@@ -1,0 +1,92 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: postgres -c max_connections=1000 -c shared_buffers=256MB
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend_network
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - backend_network
+    logging: *default-logging
+
+  backend:
+    build: .
+    restart: unless-stopped
+    command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=db
+      - REDIS_HOST=redis
+      - POSTGRES_PORT=5432
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      backend_network:
+        aliases:
+          - api
+    logging: *default-logging
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: arq src.worker.WorkerSettings
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=db
+      - REDIS_HOST=redis
+      - POSTGRES_PORT=5432
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - backend_network
+    logging: *default-logging
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+    networks:
+      - backend_network
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+
+networks:
+  backend_network:

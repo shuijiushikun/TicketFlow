@@ -1,0 +1,32 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.2
+    hooks:
+      - id: ruff
+        args: [ --fix ]
+        exclude: ^migrations/
+      - id: ruff-format
+        exclude: ^migrations/
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.1
+    hooks:
+      - id: mypy
+        exclude: ^migrations/
+        additional_dependencies: [
+          "pydantic>=2.0",
+          "pydantic-settings>=2.0",
+          "sqlalchemy>=2.0",
+          "argon2-cffi>=25.1.0",
+          "pytest",
+          "httpx",
+          "fastapi",
+          "PyJWT",
+          "types-PyJWT",
+          "polyfactory",
+          "redis>=5.0.0",
+          "arq",
+          "aiosqlite>=0.22.1",
+          "fakeredis[lua]>=2.39.0",
+        ]
+        args: [ "--config-file=pyproject.toml" ]
