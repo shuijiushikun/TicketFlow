@@ -27,3 +27,17 @@ htmlcov/
 .ruff_cache/
 
 docker-compose.override.yml
+
+# 本地学习文档与协作资料，不纳入版本控制
+/项目升级计划.md
+/学习路线.md
+/项目问题表.md
+/代码精读导航.md
+/AGENTS.md
+/.agents/
+/.codex/
+/.tooling/
+
+# 压测生成的数据、凭证和报告
+/load_tests/artifacts/
+/load_tests/*.html

@@ -30,6 +30,9 @@ packages = ["src"]
 pythonpath = "."
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Locust 插件的 gevent 补丁会干扰异步数据库测试，压测通过 Locust CLI 运行。
+addopts = "-p no:locust"
+asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [

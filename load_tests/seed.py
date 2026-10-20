@@ -1,124 +1,180 @@
+"""补齐专用压测数据；不删除票据、不重置数据库或 Redis 库存。"""
+
+import argparse
 import asyncio
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from pathlib import Path
 
-from sqlalchemy import insert, select
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from argon2 import PasswordHasher
+from sqlalchemy import insert, select, update
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from src.core.config import settings
-from src.core.security import get_password_hash
-from src.models.event import Event
-from src.models.ticket_type import TicketType
-from src.models.user import User
+from load_tests.targets import DEFAULT_MANIFEST, LoadTestTargets, write_targets
+from src.models import Base, Event, TicketType, User
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 USERS_COUNT = 10_000
-TEST_PASSWORD = "extremely_strong_password"
-BATCH_SIZE = 5_000
+BATCH_SIZE = 1000
 
 
-async def seed_db(engine: AsyncEngine) -> None:
-    """向数据库写入压测所需的活动、票种和用户测试数据。"""
-    AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
-        bind=engine,
-        expire_on_commit=False,
-        autoflush=False,
-    )
-
-    logger.info("正在生成测试用户的密码哈希……")
-    real_password_hash = get_password_hash(TEST_PASSWORD)
-
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            stmt = select(Event).where(Event.title == "Rammstein: Europe Stadium Tour")
-            existing_event = (await session.execute(stmt)).scalar_one_or_none()
-
-            if not existing_event:
-                logger.info("正在创建压测活动……")
-                event = Event(
-                    title="Rammstein: Europe Stadium Tour",
-                    date=datetime.now(UTC) + timedelta(days=30),
-                    country="Poland",
-                    city="Wrocław",
-                    street_address="Tarczyński Arena",
-                )
-                session.add(event)
-                await session.flush()
-            else:
-                logger.info("压测活动已存在。")
-                event = existing_event
-
-            tt_stmt = select(TicketType).where(TicketType.event_id == event.id)
-            existing_tts = (await session.execute(tt_stmt)).scalars().all()
-
-            if not existing_tts:
-                logger.info("正在创建压测票种……")
-                ticket_types = [
-                    TicketType(
-                        event_id=event.id,
-                        name="Fan Zone",
-                        price=15000,
-                        tickets_quantity=5000,
-                        tickets_sold=0,
-                    ),
-                    TicketType(
-                        event_id=event.id,
-                        name="VIP",
-                        price=50000,
-                        tickets_quantity=500,
-                        tickets_sold=0,
-                    ),
-                ]
-                session.add_all(ticket_types)
-                await session.flush()
-                tt_ids = [tt.id for tt in ticket_types]
-            else:
-                logger.info("压测票种已存在。")
-                tt_ids = [tt.id for tt in existing_tts]
-
-            user_check = await session.execute(select(User.id).limit(1))
-            if not user_check.scalar_one_or_none():
-                logger.info(f"准备写入 {USERS_COUNT} 个测试用户……")
-                users_data: list[dict[str, Any]] = [
-                    {
-                        "email": f"loadtest_{i}@example.com",
-                        "hashed_password": real_password_hash,
-                        "is_active": True,
-                    }
-                    for i in range(1, USERS_COUNT + 1)
-                ]
-
-                for i in range(0, len(users_data), BATCH_SIZE):
-                    batch = users_data[i : i + BATCH_SIZE]
-                    await session.execute(insert(User).values(batch))
-            else:
-                logger.info("测试用户已初始化。")
-
-            logger.info("压测数据初始化完成！")
-            logger.info(f"--- TARGET_EVENT_ID = {event.id}")
-            logger.info(f"--- AVAILABLE_TICKET_TYPES = {tt_ids}")
-
-
-async def main() -> None:
-    """压测数据初始化脚本入口，执行完成后释放数据库引擎。"""
-    engine = create_async_engine(str(settings.DATABASE_URL), pool_pre_ping=True)
+def validate_database_url(database_url: str | URL) -> URL:
+    """只允许 CLI 写入名称以 _loadtest 结尾的显式 PostgreSQL 数据库。"""
     try:
-        await seed_db(engine)
-    except Exception as e:
-        logger.error(f"压测数据初始化失败：{e}")
+        url = make_url(database_url)
+    except Exception as error:
+        raise ValueError("必须提供专用 _loadtest 数据库 URL") from error
+    if (
+        url.drivername != "postgresql+asyncpg"
+        or not url.database
+        or not url.database.endswith("_loadtest")
+    ):
+        raise ValueError("只允许 postgresql+asyncpg 且数据库名以 _loadtest 结尾")
+    return url
+
+
+async def seed_db(
+    engine: AsyncEngine,
+    users_count: int = USERS_COUNT,
+    *,
+    create_schema: bool = False,
+) -> LoadTestTargets:
+    """补齐专用用户并返回真实 ID；SQLite 仅用于本地回归测试。"""
+    if type(users_count) is not int or users_count <= 0:
+        raise ValueError("users_count 必须是正整数")
+    if engine.url.get_backend_name() != "sqlite":
+        validate_database_url(engine.url)
+    if create_schema:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory.begin() as session:
+        event = await session.scalar(
+            select(Event).where(Event.title == "Rammstein: Europe Stadium Tour")
+        )
+        if event is None:
+            event = Event(
+                title="Rammstein: Europe Stadium Tour",
+                date=datetime.now(UTC) + timedelta(days=30),
+                country="Poland",
+                city="Wrocław",
+                street_address="Tarczyński Arena",
+            )
+            session.add(event)
+            await session.flush()
+
+        ticket_types = list(
+            await session.scalars(
+                select(TicketType)
+                .where(TicketType.event_id == event.id)
+                .order_by(TicketType.id)
+            )
+        )
+        if not ticket_types:
+            ticket_types = [
+                TicketType(
+                    event_id=event.id,
+                    name=name,
+                    price=price,
+                    tickets_quantity=quantity,
+                    tickets_sold=0,
+                )
+                for name, price, quantity in (
+                    ("Fan Zone", 15000, 5000),
+                    ("VIP", 50000, 500),
+                )
+            ]
+            session.add_all(ticket_types)
+            await session.flush()
+
+        user_ids: list[int] = []
+        password_hash: str | None = None
+        for start in range(1, users_count + 1, BATCH_SIZE):
+            emails = [
+                f"loadtest_{index}@example.com"
+                for index in range(start, min(start + BATCH_SIZE, users_count + 1))
+            ]
+            existing = {
+                user.email: user
+                for user in await session.scalars(
+                    select(User).where(User.email.in_(emails))
+                )
+            }
+            missing = [email for email in emails if email not in existing]
+            if missing:
+                if password_hash is None:
+                    password_hash = PasswordHasher().hash(secrets.token_urlsafe(32))
+                await session.execute(
+                    insert(User),
+                    [
+                        {
+                            "email": email,
+                            "hashed_password": password_hash,
+                            "is_active": True,
+                        }
+                        for email in missing
+                    ],
+                )
+            # 只激活约定邮箱集合中的专用用户，不修改普通用户或已有密码。
+            await session.execute(
+                update(User)
+                .where(User.email.in_(emails), User.is_active.is_(False))
+                .values(is_active=True)
+            )
+            rows = await session.execute(
+                select(User.email, User.id).where(
+                    User.email.in_(emails), User.is_active.is_(True)
+                )
+            )
+            actual = {email: user_id for email, user_id in rows}
+            user_ids.extend(actual[email] for email in emails)
+
+        targets = LoadTestTargets(
+            event_id=event.id,
+            ticket_type_ids=[ticket_type.id for ticket_type in ticket_types],
+            user_ids=user_ids,
+        )
+    logger.info(
+        "压测目标已准备：活动 %s，票种 %s，启用用户 %s 个",
+        event.id,
+        targets.ticket_type_ids,
+        len(user_ids),
+    )
+    return targets
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """解析参数，数据库地址必须由调用者显式提供。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--database-url", required=True, help="专用 _loadtest 数据库 URL"
+    )
+    parser.add_argument("--users-count", type=int, default=USERS_COUNT)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--create-schema", action="store_true", help="显式创建缺失表")
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> None:
+    """在专用数据库初始化数据，失败向 CLI 返回非零状态。"""
+    args = parse_args(argv)
+    url = validate_database_url(args.database_url)
+    engine = create_async_engine(url, pool_pre_ping=True)
+    try:
+        targets = await seed_db(
+            engine, users_count=args.users_count, create_schema=args.create_schema
+        )
+        write_targets(targets, args.manifest)
+        logger.info("manifest 已写入 %s", args.manifest)
+        logger.info("未重置已有票据或库存；Redis 库存预热由基线驱动单独处理。")
     finally:
         await engine.dispose()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
     asyncio.run(main())

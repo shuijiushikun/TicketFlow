@@ -1,4 +1,4 @@
-import asyncio
+import os
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
@@ -6,105 +6,142 @@ from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
-from dotenv import load_dotenv
+import pytest_asyncio
+from dotenv import dotenv_values
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy import NullPool, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from src.db.redis import close_redis_pool, get_arq_pool, init_redis_pool
-from src.db.session import get_db
-from src.main import app
+from tests.resource_safety import RESOURCE_MARKER_KEY, TestResources
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-load_dotenv(BASE_DIR / ".env")
-
-from src.core.config import settings  # noqa: E402
-from src.db.base import Base  # noqa: E402
-
-load_dotenv()
-
-TEST_DB_NAME = f"{settings.POSTGRES_DB}_test"
-SYSTEM_URL = settings.DATABASE_URL.replace(f"/{settings.POSTGRES_DB}", "/postgres")
-TEST_DB_URL = settings.DATABASE_URL.replace(
-    f"/{settings.POSTGRES_DB}", f"/{TEST_DB_NAME}"
-)
-
-test_engine = create_async_engine(TEST_DB_URL, poolclass=NullPool)
-async_session_maker = async_sessionmaker(test_engine, expire_on_commit=False)
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session", autouse=True)
-async def setup_test_db(
-    event_loop: asyncio.AbstractEventLoop,
-) -> AsyncGenerator[None, None]:
-    sys_url_clean = SYSTEM_URL.replace("+asyncpg", "")
-
-    conn = await asyncpg.connect(sys_url_clean)
-
-    await conn.execute(
-        f"""
-        SELECT pg_terminate_backend(pg_stat_activity.pid)
-        FROM pg_stat_activity
-        WHERE pg_stat_activity.datname = '{TEST_DB_NAME}'
-        AND pid <> pg_backend_pid();
-    """
-    )
-
-    await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"')
-    await conn.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
-    await conn.close()
-
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
+if any(key.startswith("TICKETCORE_TEST_") for key in os.environ):
     try:
-        conn = await asyncpg.connect(sys_url_clean)
-        await conn.execute(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"')
-        await conn.close()
-    except Exception as e:
-        print(f"Warning during DB drop: {e}")
+        TestResources.from_environment(os.environ).configure_environment(os.environ)
+    except ValueError as error:
+        raise pytest.UsageError(str(error)) from error
+
+# 仅提供非敏感默认值；测试目标必须来自上方显式配置，不能从业务 .env 推导。
+for key, value in dotenv_values(BASE_DIR / ".env.example").items():
+    if value is not None:
+        os.environ.setdefault(key, value)
+
+from src.db.base import Base  # noqa: E402
+from src.db.redis import (  # noqa: E402
+    close_redis_pool,
+    get_arq_pool,
+    init_redis_pool,
+)
+from src.db.session import get_db  # noqa: E402
+from src.main import app  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-async def clean_tables() -> None:
-    async with async_session_maker() as session:
+def external_resources(request: pytest.FixtureRequest) -> None:
+    """只有集成和并发测试启用外部资源，单元/本地回归不执行清库。"""
+    relative = request.node.path.relative_to(BASE_DIR / "tests")
+    if relative.parts[0] in {"integration", "stress"}:
+        request.getfixturevalue("clean_tables")
+        request.getfixturevalue("flush_redis_between_tests")
+
+
+@pytest.fixture(scope="session")
+def test_resources() -> TestResources:
+    try:
+        return TestResources.from_environment(os.environ)
+    except ValueError as error:
+        raise pytest.UsageError(str(error)) from error
+
+
+@pytest.fixture(scope="session")
+def test_engine(test_resources: TestResources) -> Generator[AsyncEngine, None, None]:
+    yield create_async_engine(test_resources.sqlalchemy_url, poolclass=NullPool)
+
+
+async def verify_redis_owner(resources: TestResources) -> None:
+    """使用不被 FLUSHDB 清除的独立控制库验证测试实例所有权。"""
+    async with Redis.from_url(
+        resources.redis_control_url, decode_responses=True
+    ) as control:
+        resources.require_marker(await control.get(RESOURCE_MARKER_KEY))
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def setup_test_db(
+    test_resources: TestResources,
+    test_engine: AsyncEngine,
+) -> AsyncGenerator[None, None]:
+    await verify_redis_owner(test_resources)
+    conn = await asyncpg.connect(test_resources.admin_dsn)
+    database_name = test_resources.database_name
+    try:
+        marker = await conn.fetchval(
+            "SELECT shobj_description(oid, 'pg_database') "
+            "FROM pg_database WHERE datname = $1",
+            database_name,
+        )
+        test_resources.require_marker(marker)
+        await conn.execute(f'DROP DATABASE "{database_name}"')
+        await conn.execute(f'CREATE DATABASE "{database_name}"')
+        comment = await conn.fetchval(
+            "SELECT format('COMMENT ON DATABASE %I IS %L', $1::text, $2::text)",
+            database_name,
+            test_resources.marker,
+        )
+        await conn.execute(comment)
+    finally:
+        await conn.close()
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield
+    finally:
+        # 保留空的测试库及所有权标记，便于下次重置；不终止其他数据库连接。
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await test_engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_tables(setup_test_db: None, test_engine: AsyncEngine) -> None:
+    async with AsyncSession(test_engine) as session:
         await session.execute(
             text("TRUNCATE TABLE tickets, events, users RESTART IDENTITY CASCADE;")
         )
         await session.commit()
 
 
-@pytest.fixture
-async def db_connection() -> AsyncGenerator[AsyncSession, None]:
-    async with async_session_maker() as session:
+@pytest_asyncio.fixture
+async def db_connection(
+    setup_test_db: None,
+    test_engine: AsyncEngine,
+) -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSession(test_engine, expire_on_commit=False) as session:
         yield session
 
 
-@pytest.fixture(autouse=True)
-async def setup_redis_for_tests() -> AsyncGenerator[None, None]:
+@pytest_asyncio.fixture
+async def setup_redis_for_tests(
+    test_resources: TestResources,
+) -> AsyncGenerator[None, None]:
+    await verify_redis_owner(test_resources)
     await init_redis_pool()
-    yield
-    await close_redis_pool()
+    try:
+        yield
+    finally:
+        await close_redis_pool()
 
 
-@pytest.fixture(autouse=True)
-async def flush_redis_between_tests() -> None:
-    redis_client = Redis.from_url(settings.REDIS_URL)
-    await redis_client.flushdb()
-    await redis_client.aclose()
+@pytest_asyncio.fixture
+async def flush_redis_between_tests(
+    setup_redis_for_tests: None,
+    test_resources: TestResources,
+) -> None:
+    await verify_redis_owner(test_resources)
+    async with Redis.from_url(test_resources.redis_url) as redis_client:
+        await redis_client.flushdb()
 
 
 @pytest.fixture

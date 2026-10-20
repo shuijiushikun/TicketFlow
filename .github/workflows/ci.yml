@@ -59,6 +59,10 @@ jobs:
       POSTGRES_PORT: "5432"
       REDIS_HOST: "localhost"
       REDIS_PORT: "6379"
+      TICKETCORE_TEST_ALLOW_RESET: "1"
+      TICKETCORE_TEST_POSTGRES_DSN: "postgresql://ci_user:ci_password@localhost:5432/ticketcore_ci_test"
+      TICKETCORE_TEST_REDIS_URL: "redis://localhost:6379/0"
+      TICKETCORE_TEST_RESOURCE_TOKEN: "ticketcore-disposable-ci-resources"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -74,4 +78,6 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run Pytest
-        run: uv run pytest -v
+        run: |
+          uv run python -m tests.prepare_resources --initialize-isolated-resources
+          uv run pytest -v

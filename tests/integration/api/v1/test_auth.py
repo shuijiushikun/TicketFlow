@@ -131,9 +131,8 @@ class TestAuthLogin:
         response = await client.post(self.BASE_URL, data=payload)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-        assert (
-            "incorrect email or password" in response.json().get("detail", "").lower()
-        )
+        assert response.json() == {"detail": "邮箱或密码不正确"}
+        assert response.headers["www-authenticate"] == "Bearer"
 
     async def test_login_non_existent_user(self, client: AsyncClient) -> None:
         payload = {
@@ -144,9 +143,8 @@ class TestAuthLogin:
         response = await client.post(self.BASE_URL, data=payload)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-        assert (
-            "incorrect email or password" in response.json().get("detail", "").lower()
-        )
+        assert response.json() == {"detail": "邮箱或密码不正确"}
+        assert response.headers["www-authenticate"] == "Bearer"
 
     async def test_login_inactive_user(
         self, client: AsyncClient, db_connection: AsyncSession
