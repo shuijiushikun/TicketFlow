@@ -1,19 +1,31 @@
-from collections.abc import Sequence
+from __future__ import annotations
+
+import asyncio
+import random
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
+from asyncpg import InterfaceError, PostgresError
 from pydantic import TypeAdapter
-from redis.asyncio import Redis
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.core import logger
+from src.core.cache_lock import CacheLock
+from src.core.cache_policy import (
+    CacheCircuitBreaker,
+    CacheUnavailableError,
+    DatabaseAdmission,
+)
+from src.core.cache_runtime import cache_admission, cache_circuit
+from src.core.cache_store import CacheOfflineError, EventCacheStore
+from src.core.config import settings
 from src.core.exception import EventDeleteError, EventNotFoundError
-from src.core.redis_keys import RedisKeys
+from src.core.redis_keys import RedisClient, RedisKeys
 from src.models import Event
 from src.schemas import EventCreate, EventDetailResponse, EventResponse
-
-RedisClient = Redis
 
 
 class EventRepository:
@@ -43,7 +55,7 @@ class EventRepository:
 
     async def get_all(self, offset: int, limit: int) -> Sequence[Event]:
         """按 offset 和 limit 从数据库分页查询活动列表。"""
-        query = select(Event).offset(offset).limit(limit)
+        query = select(Event).order_by(Event.id).offset(offset).limit(limit)
         result = await self.db.scalars(query)
         return result.all()
 
@@ -71,58 +83,137 @@ class EventRepository:
 
 
 class CachedEventRepository:
-    """在活动数据库仓库外包装 Redis 缓存。
+    """活动查询缓存：空值、有限互斥重建、版本保护和本地回源预算。"""
 
-    查询时先读缓存，未命中再查询数据库并回写；提供缓存失效方法供写操作调用。
-    """
+    NOT_FOUND = "__NOT_FOUND__"
 
-    def __init__(self, repository: EventRepository, redis: RedisClient) -> None:
+    def __init__(
+        self,
+        repository: EventRepository,
+        redis: RedisClient,
+        *,
+        admission: DatabaseAdmission = cache_admission,
+        circuit: CacheCircuitBreaker = cache_circuit,
+    ) -> None:
         self.repo = repository
         self.redis = redis
+        self.store = EventCacheStore(redis, circuit)
+        self.admission = admission
 
     async def get(self, event_id: int) -> EventDetailResponse:
-        """先读活动详情缓存，未命中时查询数据库，转换为响应模型并缓存 24 小时。
+        """查询详情；仅数据库确认不存在时写短期空值缓存。"""
 
-        活动不存在时抛出 EventNotFoundError。
-        """
-        cached_key = RedisKeys.event_static(event_id)
+        async def load() -> str:
+            event = await self.repo.get(event_id)
+            if event is None:
+                return self.NOT_FOUND
+            return EventDetailResponse.model_validate(event).model_dump_json()
 
-        cached_data = await self.redis.get(cached_key)
-        if cached_data:
-            return EventDetailResponse.model_validate_json(cached_data)
-
-        event = await self.repo.get(event_id)
-        if not event:
-            raise EventNotFoundError("活动不存在")
-
-        event_dto = EventDetailResponse.model_validate(event)
-
-        await self.redis.set(
-            cached_key, event_dto.model_dump_json(), ex=RedisKeys.TTL_STATIC_24H
+        body = await self._query(
+            RedisKeys.event_static(event_id),
+            RedisKeys.event_generation(event_id),
+            load,
+            settings.CACHE_DETAIL_TTL_SECONDS,
+            settings.CACHE_DETAIL_JITTER_SECONDS,
         )
-
-        return event_dto
+        if body == self.NOT_FOUND:
+            raise EventNotFoundError("活动不存在")
+        return EventDetailResponse.model_validate_json(body)
 
     async def get_all(self, offset: int, limit: int) -> Sequence[EventResponse]:
-        """按版本化缓存键读取活动分页列表，未命中时查询数据库并缓存 1 小时。"""
-        cached_key = await RedisKeys.event_list(self.redis, offset, limit)
-        cached_data = await self.redis.get(cached_key)
-
+        """查询指定分页；所有分页共享失效版本，各分页单独互斥重建。"""
         adapter = TypeAdapter(list[EventResponse])
 
-        if cached_data:
-            return adapter.validate_json(cached_data)
+        async def load() -> str:
+            events = await self.repo.get_all(offset, limit)
+            return adapter.dump_json(
+                [EventResponse.model_validate(e) for e in events]
+            ).decode()
 
-        events = await self.repo.get_all(offset, limit)
-        events_dto = [EventResponse.model_validate(e) for e in events]
-
-        await self.redis.set(
-            cached_key, adapter.dump_json(events_dto), ex=RedisKeys.TTL_LISTS_1H
+        body = await self._query(
+            RedisKeys.event_list(offset, limit),
+            RedisKeys.event_list_generation(),
+            load,
+            settings.CACHE_LIST_TTL_SECONDS,
+            settings.CACHE_LIST_JITTER_SECONDS,
         )
+        return adapter.validate_json(body)
 
-        return events_dto
+    async def _load(self, load: Callable[[], Awaitable[str]]) -> str:
+        async with self.admission.slot():
+            try:
+                return await load()
+            except (SQLAlchemyError, OSError, InterfaceError, PostgresError) as exc:
+                logger.error("活动查询数据库操作失败", exc_info=True)
+                raise CacheUnavailableError("活动数据暂不可用，请稍后重试") from exc
+
+    async def _query(
+        self,
+        cache_key: str,
+        generation_key: str,
+        load: Callable[[], Awaitable[str]],
+        base_ttl: int,
+        jitter: int,
+    ) -> str:
+        lock = CacheLock(
+            self.redis, RedisKeys.cache_lock(cache_key), settings.CACHE_LOCK_LEASE_MS
+        )
+        acquired = False
+        try:
+            generation, body = await self.store.read(generation_key, cache_key)
+            if body is not None:
+                return body
+            deadline = (
+                asyncio.get_running_loop().time() + settings.CACHE_LOCK_WAIT_SECONDS
+            )
+            while True:
+                # 竞争只等待有限时间；超时返回 503，不绕过锁集中回源。
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        acquired = await self.store.call(lock.acquire)
+                        if not acquired:
+                            await asyncio.sleep(random.uniform(0.015, 0.035))
+                        # 获得锁后再次读取，包括版本，防止等待期间发生写入。
+                        generation, body = await self.store.read(
+                            generation_key, cache_key
+                        )
+                except TimeoutError as exc:
+                    raise CacheUnavailableError("活动缓存正在重建，请稍后重试") from exc
+                if body is not None:
+                    return body
+                if acquired:
+                    break
+
+            body = await self._load(load)
+            ttl = base_ttl + random.randint(0, jitter)
+            if body == self.NOT_FOUND:
+                ttl = settings.CACHE_NEGATIVE_TTL_SECONDS + random.randint(
+                    0, settings.CACHE_NEGATIVE_JITTER_SECONDS
+                )
+            try:
+                await self.store.fill(
+                    generation_key,
+                    cache_key,
+                    generation,
+                    lock.key,
+                    lock.token,
+                    body,
+                    ttl,
+                )
+            except CacheOfflineError:
+                # 已获得数据库结果，回填失败不重复查询，也不丢失成功响应。
+                pass
+            return body
+        except CacheOfflineError:
+            return await self._load(load)
+        finally:
+            if acquired:
+                try:
+                    await self.store.call(lock.release)
+                except CacheOfflineError:
+                    # 释放失败由有限租期兜底，禁止无条件 DEL。
+                    pass
 
     async def invalidate_event(self, event_id: int) -> None:
-        """删除指定活动的详情缓存，并提升列表缓存版本号，使旧列表失效。"""
-        await self.redis.delete(RedisKeys.event_static(event_id))
-        await RedisKeys.bump_event_list_version(self.redis)
+        """数据库提交后切换版本；可靠失效补偿由后续交易可靠性阶段完成。"""
+        await self.store.invalidate(event_id)

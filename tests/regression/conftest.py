@@ -19,7 +19,7 @@ for key, value in dotenv_values(Path(__file__).parents[2] / ".env.example").item
 
 from src.api.deps import get_current_user  # noqa: E402
 from src.db.base import Base  # noqa: E402
-from src.db.redis import get_arq_pool, get_redis  # noqa: E402
+from src.db.redis import get_arq_pool, get_cache_redis, get_redis  # noqa: E402
 from src.db.session import get_db  # noqa: E402
 from src.main import app  # noqa: E402
 from src.models import Event, Ticket, TicketType, User  # noqa: E402
@@ -89,6 +89,7 @@ async def lifecycle_client(
             get_db: local_db,
             get_current_user: lambda: ticket.owner,
             get_redis: lambda: business,
+            get_cache_redis: lambda: business,
             get_arq_pool: lambda: AsyncMock(),
         }
     )

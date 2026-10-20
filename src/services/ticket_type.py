@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 
 from sqlalchemy import select
@@ -5,6 +7,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import logger
+from src.core.cache_runtime import cache_circuit
+from src.core.cache_store import EventCacheStore
 from src.core.exception import (
     TicketTypeDeleteError,
     TicketTypeNotFoundError,
@@ -23,9 +27,18 @@ from src.schemas.ticket_type import (
 class TicketTypeService:
     """票种业务层，处理定价、容量限制和 Redis 库存初始化及更新。"""
 
-    def __init__(self, session: AsyncSession, redis: RedisClient) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        redis: RedisClient,
+        *,
+        cache_redis: RedisClient | None = None,
+    ) -> None:
         self.db = session
         self.redis = redis
+        self.event_cache = EventCacheStore(
+            cache_redis if cache_redis is not None else redis, cache_circuit
+        )
 
     async def create(
         self, event_id: int, type_data: TicketTypeCreate
@@ -48,8 +61,7 @@ class TicketTypeService:
             inventory_key = RedisKeys.ticket_type_inventory(new_ticket_type.id)
             await self.redis.set(inventory_key, new_ticket_type.tickets_quantity)
 
-            await self.redis.delete(RedisKeys.event_static(event_id))
-            await RedisKeys.bump_event_list_version(self.redis)
+            await self.event_cache.invalidate(event_id)
 
             logger.info(f"票种创建成功，票种 ID：{new_ticket_type.id}")
         except SQLAlchemyError:
@@ -97,8 +109,7 @@ class TicketTypeService:
             await self.db.commit()
 
             await self.redis.delete(RedisKeys.ticket_type_inventory(ticket_type_id))
-            await self.redis.delete(RedisKeys.event_static(event_id))
-            await RedisKeys.bump_event_list_version(self.redis)
+            await self.event_cache.invalidate(event_id)
 
             logger.info(f"票种删除成功，票种 ID：{ticket_type_id}")
         except IntegrityError as e:
@@ -147,8 +158,7 @@ class TicketTypeService:
                 )
                 await self.redis.set(inventory_key, available_tickets)
 
-            await self.redis.delete(RedisKeys.event_static(ticket_type.event_id))
-            await RedisKeys.bump_event_list_version(self.redis)
+            await self.event_cache.invalidate(ticket_type.event_id)
 
             logger.info(f"票种更新成功，票种 ID：{ticket_type_id}")
         except SQLAlchemyError:

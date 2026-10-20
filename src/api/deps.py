@@ -4,15 +4,16 @@ from typing import Annotated
 
 import jwt
 from arq import ArqRedis
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import ValidationError
-from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import settings
+from src.core.cache_runtime import event_query_limiter
 from src.core.logger import logger
-from src.db.redis import get_arq_pool, get_redis
+from src.core.redis_keys import RedisClient
+from src.db.redis import get_arq_pool, get_cache_redis, get_redis
 from src.db.session import get_db
 from src.models import User
 from src.repositories.event import CachedEventRepository, EventRepository
@@ -24,8 +25,6 @@ from src.services.idempotency import IdempotencyService
 from src.services.payment import PaymentService
 from src.services.ticket import TicketService
 from src.services.ticket_type import TicketTypeService
-
-RedisClient = Redis
 
 reusable_oauth2 = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
@@ -112,12 +111,18 @@ async def get_ticket_service(
 
 
 async def get_event_service(
-    session: DBDep, redis: RedisClient = Depends(get_redis)
+    session: DBDep, redis: RedisClient = Depends(get_cache_redis)
 ) -> EventService:
     """为接口准备活动服务，组合数据库仓库与 Redis 缓存仓库。"""
     base_repo = EventRepository(session)
     cached_repo = CachedEventRepository(repository=base_repo, redis=redis)
     return EventService(session=session, base_repo=base_repo, cached_repo=cached_repo)
+
+
+async def limit_event_queries(request: Request) -> None:
+    """限制公开活动查询；使用连接地址，不自行信任客户端转发头。"""
+    client = request.client.host if request.client else "unknown"
+    event_query_limiter.check(client)
 
 
 async def get_auth_service(session: DBDep) -> AuthService:
@@ -126,10 +131,12 @@ async def get_auth_service(session: DBDep) -> AuthService:
 
 
 async def get_ticket_type_service(
-    session: DBDep, redis: RedisClient = Depends(get_redis)
+    session: DBDep,
+    redis: RedisClient = Depends(get_redis),
+    cache_redis: RedisClient = Depends(get_cache_redis),
 ) -> TicketTypeService:
     """为接口准备票种服务，并注入数据库会话和 Redis 连接。"""
-    return TicketTypeService(session=session, redis=redis)
+    return TicketTypeService(session=session, redis=redis, cache_redis=cache_redis)
 
 
 async def get_idempotency_service(

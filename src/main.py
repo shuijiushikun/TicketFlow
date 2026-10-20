@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 from src.api import health
 from src.api.v1 import auth, events, payment, ticket_type, tickets
 from src.core import logger
+from src.core.cache_policy import CacheUnavailableError, QueryRateLimitError
 from src.core.config import settings
 from src.core.exception import (
     EmptyUpdateDataError,
@@ -156,8 +157,23 @@ async def empty_update_data_exception_handler(
 
 
 @app.exception_handler(HealthError)
+@app.exception_handler(CacheUnavailableError)
 async def service_unavailable(request: Request, exc: Exception) -> JSONResponse:
     """将数据库、缓存等关键依赖不可用的异常转换为 503。"""
     return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": str(exc)}
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": str(exc)},
+        headers={"Retry-After": "1"},
+    )
+
+
+@app.exception_handler(QueryRateLimitError)
+async def query_rate_limited(
+    request: Request, exc: QueryRateLimitError
+) -> JSONResponse:
+    """区分请求限流和业务不存在，并告诉客户端何时可以重试。"""
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": str(exc)},
+        headers={"Retry-After": str(exc.retry_after)},
     )

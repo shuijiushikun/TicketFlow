@@ -1,51 +1,50 @@
 from collections.abc import Awaitable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from redis.asyncio import Redis
 
-RedisClient = Redis
+# types-redis 声明了泛型，但运行时 Redis 类不支持下标；FastAPI 会求值注解。
+if TYPE_CHECKING:
+    RedisClient = Redis[str]
+else:
+    RedisClient = Redis
 
 
 class RedisKeys:
     """集中管理 Redis 键名，统一缓存、库存和预订记录的命名规则。
 
-    活动列表通过版本号切换缓存键，使旧缓存失效，无需逐个删除。
+    活动查询缓存使用独立命名空间及随机版本，库存键保持原有语义。
     """
-
-    TTL_STATIC_24H: int = 86400
-    TTL_LISTS_1H: int = 3600
 
     @staticmethod
     def event_static(event_id: int) -> str:
-        """根据活动 ID 生成活动详情缓存键。"""
-        return f"ticketcore:events:static:{event_id}"
+        """生成活动详情缓存哈希键，保存版本与响应正文。"""
+        return f"ticketcore:cache:v2:events:detail:{event_id}"
+
+    @staticmethod
+    def event_generation(event_id: int) -> str:
+        """生成活动详情版本键，包括确认不存在的活动。"""
+        return f"ticketcore:cache:v2:events:detail:{event_id}:generation"
+
+    @staticmethod
+    def event_list_generation() -> str:
+        """生成分页列表共享的版本键。"""
+        return "ticketcore:cache:v2:events:list:generation"
+
+    @staticmethod
+    def event_list(offset: int, limit: int) -> str:
+        """生成分页缓存键，读取时原子检查其版本是否仍有效。"""
+        return f"ticketcore:cache:v2:events:list:o:{offset}:l:{limit}"
+
+    @staticmethod
+    def cache_lock(cache_key: str) -> str:
+        """生成单个详情或分页缓存的重建锁键。"""
+        return f"{cache_key}:lock"
 
     @staticmethod
     def ticket_type_inventory(ticket_type_id: int) -> str:
         """根据票种 ID 生成可用库存计数器的键，供 Lua 脚本原子扣减。"""
         return f"ticketcore:inventory:ticket_type:{ticket_type_id}"
-
-    @staticmethod
-    async def event_list(redis: RedisClient, offset: int, limit: int) -> str:
-        """根据全局版本号、offset 和 limit 生成活动分页列表的缓存键。"""
-        version_val = await redis.get("ticketcore:events:list_version")
-
-        if not version_val:
-            version = 1
-            await redis.set("ticketcore:events:list_version", version)
-
-        else:
-            version = int(version_val)
-
-        return f"ticketcore:events:list:v:{version}:o:{offset}:l:{limit}"
-
-    @staticmethod
-    async def bump_event_list_version(redis: RedisClient) -> None:
-        """递增活动列表缓存版本号，使旧版本缓存不再被读取。
-
-        旧键由各自的有效期自动清理，无需遍历删除。
-        """
-        await redis.incr("ticketcore:events:list_version")
 
     @staticmethod
     def canceled_tickets_set() -> str:

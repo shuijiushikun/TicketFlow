@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -32,6 +33,27 @@ class Settings(BaseSettings):
     REDIS_TTL_SECONDS: int
 
     TICKET_RESERVATION_TIME_SECONDS: int
+
+    # 仅用于活动查询缓存；库存、支付和 Arq 不使用这些过期与准入参数。
+    CACHE_DETAIL_TTL_SECONDS: int = Field(default=86400, ge=1)
+    CACHE_DETAIL_JITTER_SECONDS: int = Field(default=3600, ge=0)
+    CACHE_LIST_TTL_SECONDS: int = Field(default=3600, ge=1)
+    CACHE_LIST_JITTER_SECONDS: int = Field(default=600, ge=0)
+    CACHE_NEGATIVE_TTL_SECONDS: int = Field(default=30, ge=1)
+    CACHE_NEGATIVE_JITTER_SECONDS: int = Field(default=30, ge=0)
+    CACHE_REDIS_TIMEOUT_SECONDS: float = Field(default=0.15, gt=0)
+    CACHE_CIRCUIT_COOLDOWN_SECONDS: float = Field(default=2.0, gt=0)
+    CACHE_LOCK_LEASE_MS: int = Field(default=5000, ge=1)
+    CACHE_LOCK_WAIT_SECONDS: float = Field(default=0.3, gt=0)
+    CACHE_DB_CONCURRENCY: int = Field(default=4, ge=1)
+    CACHE_DB_QUEUE_SIZE: int = Field(default=8, ge=0)
+    CACHE_DB_QUEUE_TIMEOUT_SECONDS: float = Field(default=0.05, gt=0)
+    CACHE_DB_QUERY_TIMEOUT_SECONDS: float = Field(default=1.5, gt=0)
+    EVENT_QUERY_RATE: float = Field(default=100, gt=0)
+    EVENT_QUERY_BURST: int = Field(default=200, ge=1)
+    EVENT_QUERY_GLOBAL_RATE: float = Field(default=1000, gt=0)
+    EVENT_QUERY_GLOBAL_BURST: int = Field(default=2000, ge=1)
+    EVENT_QUERY_MAX_CLIENTS: int = Field(default=10000, ge=1)
 
     @property
     def DATABASE_URL(self) -> str:

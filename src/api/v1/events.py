@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
-from fastapi.params import Query
+from fastapi.params import Path, Query
 
 from src.api.decorators import idempotent
 from src.api.deps import (
@@ -11,6 +11,7 @@ from src.api.deps import (
     IdempotencyServiceDep,
     TicketTypeServiceDep,
     get_current_superuser,
+    limit_event_queries,
 )
 from src.core.config import settings
 from src.core.exception import EmptyUpdateDataError
@@ -53,9 +54,11 @@ async def create_event(
     response_model=EventDetailResponse,
     status_code=status.HTTP_200_OK,
     summary="查询活动详情",
+    dependencies=[Depends(limit_event_queries)],
+    responses={429: {"description": "查询过于频繁"}, 503: {"description": "暂时繁忙"}},
 )
 async def get_event(
-    event_id: int, event_service: EventServiceDep
+    event_id: Annotated[int, Path(ge=1)], event_service: EventServiceDep
 ) -> EventDetailResponse:
     """查询活动详情。
 
@@ -69,6 +72,8 @@ async def get_event(
     response_model=list[EventResponse],
     status_code=status.HTTP_200_OK,
     summary="分页查询活动列表",
+    dependencies=[Depends(limit_event_queries)],
+    responses={429: {"description": "查询过于频繁"}, 503: {"description": "暂时繁忙"}},
 )
 async def get_events(
     event_service: EventServiceDep,
