@@ -35,5 +35,6 @@ async def ticket_payment(
     需要登录，只能支付自己的票。预订未过期时将 RESERVED（已预留）改为 SOLD（已售出）。
     这是状态流转演示，不调用真实支付渠道，也不会实际扣款。
     已付款返回 409，已取消或已过支付期限返回 400。
+    同一次支付携带相同幂等键重试，可复用原成功响应；查询票据获取当前状态。
     """
     return await payment_service.pay_for_ticket(ticket_id=ticket_id, owner_id=user.id)

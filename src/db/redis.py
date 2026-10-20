@@ -26,6 +26,9 @@ async def init_redis_pool() -> None:
         settings.REDIS_URL,
         decode_responses=True,
         max_connections=1000,
+        socket_connect_timeout=settings.TRANSACTION_REDIS_TIMEOUT_SECONDS,
+        socket_timeout=settings.TRANSACTION_REDIS_TIMEOUT_SECONDS,
+        retry_on_timeout=False,
     )
     # 与库存共用 Redis 实例及 0 号库，但查询单独限制连接和命令时间。
     cache_pool = ConnectionPool.from_url(

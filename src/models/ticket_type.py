@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin
@@ -26,6 +26,9 @@ class TicketType(Base, TimestampMixin):
 
     tickets_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     tickets_sold: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    inventory_version: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
     # 一对多关系（1:N）
     tickets: Mapped[list["Ticket"]] = relationship(
         "Ticket", back_populates="ticket_type"
@@ -41,6 +44,9 @@ class TicketType(Base, TimestampMixin):
         CheckConstraint(sqltext="price >= 0", name="check_ticket_price"),
         CheckConstraint(sqltext="tickets_quantity > 0", name="check_ticket_quantity"),
         CheckConstraint(sqltext="tickets_sold >= 0", name="check_ticket_sold"),
+        CheckConstraint(
+            sqltext="inventory_version >= 0", name="check_inventory_version"
+        ),
         CheckConstraint(
             sqltext="tickets_quantity >= tickets_sold", name="check_sold_limit"
         ),

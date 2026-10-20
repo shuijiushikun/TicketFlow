@@ -84,10 +84,11 @@ async def lifecycle_client(
         yield session
 
     original = app.dependency_overrides.copy()
+    owner = ticket.owner
     app.dependency_overrides.update(
         {
             get_db: local_db,
-            get_current_user: lambda: ticket.owner,
+            get_current_user: lambda: owner,
             get_redis: lambda: business,
             get_cache_redis: lambda: business,
             get_arq_pool: lambda: AsyncMock(),

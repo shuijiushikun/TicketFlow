@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     REDIS_HOST: str
     REDIS_PORT: int
-    REDIS_TTL_SECONDS: int
+    TRANSACTION_REDIS_TIMEOUT_SECONDS: float = Field(default=0.15, gt=0, le=1)
 
     TICKET_RESERVATION_TIME_SECONDS: int
 

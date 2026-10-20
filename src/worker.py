@@ -1,22 +1,30 @@
-import time
-from collections import Counter
+import asyncio
+from collections import deque
+from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from arq import cron
 from arq.connections import RedisSettings
 from prometheus_client import start_http_server
 from redis.asyncio import Redis
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.core import logger, settings
 from src.core.cache_policy import CacheCircuitBreaker, DatabaseAdmission
 from src.core.metrics import registry
-from src.core.redis_keys import RedisKeys
+from src.core.redis_keys import RedisClient, RedisKeys
 from src.models import Ticket, TicketType
 from src.models.ticket import TicketStatus
 from src.services.cache_warmup import warm_hot_events
+from src.services.inventory import (
+    RESERVATION_CLEANUP,
+    project_inventory,
+    transaction_outbox,
+)
+from src.services.outbox import enqueue_outbox
+from src.services.reservations import cancel_reservation, reservation_expired
 
 
 async def startup(ctx: dict[str, Any]) -> None:
@@ -35,7 +43,14 @@ async def startup(ctx: dict[str, Any]) -> None:
         bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
     )
     # ARQ 的 ctx["redis"] 连接 1 号队列库；库存和预订记录使用 0 号业务库。
-    ctx["business_redis"] = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    ctx["business_redis"] = Redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        max_connections=10,
+        socket_connect_timeout=settings.TRANSACTION_REDIS_TIMEOUT_SECONDS,
+        socket_timeout=settings.TRANSACTION_REDIS_TIMEOUT_SECONDS,
+        retry_on_timeout=False,
+    )
     ctx["cache_redis"] = Redis.from_url(
         settings.REDIS_URL,
         decode_responses=True,
@@ -83,158 +98,161 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 
 async def release_unpaid_ticket(ctx: dict[Any, Any], ticket_id: int) -> None:
-    """到期检查指定票据，并回收尚未支付的预订。
-
-    ctx 提供数据库会话工厂和业务 Redis，ticket_id 是待检查的票据 ID。
-    已付款或不存在的票据直接跳过；未付款的票据改为 CANCELED 并减少占用数量。
-    先提交数据库，再幂等回补 Redis；已取消票据重试时不会再次减少占用数量。
-    """
+    """锁定票据并复核实际期限，原子取消超时预订并持久化投递待办。"""
     session_maker = ctx["session_maker"]
-    redis: Redis = ctx["business_redis"]
+    redis: RedisClient = ctx["business_redis"]
 
     async with session_maker() as session:
         try:
-            query = select(Ticket).where(Ticket.id == ticket_id).with_for_update()
+            query = (
+                select(Ticket)
+                .where(Ticket.id == ticket_id)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
             ticket = await session.scalar(query)
-
-            if not ticket:
-                logger.info(f"后台回收：票据 {ticket_id} 不存在，跳过处理")
+            if ticket is None:
                 return
-
+            if ticket.status == TicketStatus.RESERVED and not reservation_expired(
+                ticket
+            ):
+                logger.info("后台回收：票据 %s 尚未到期，保留预订", ticket_id)
+                return
             if ticket.status == TicketStatus.SOLD:
-                logger.info(
-                    f"后台回收：票据 {ticket_id} 当前状态为 {ticket.status.name}，"
-                    f"跳过处理"
-                )
-                return
-
-            ticket_type_id = ticket.ticket_type_id
-            if ticket.status == TicketStatus.RESERVED:
-                ticket.status = TicketStatus.CANCELED
-                update_query = (
-                    update(TicketType)
-                    .where(TicketType.id == ticket_type_id)
-                    .values(tickets_sold=TicketType.tickets_sold - 1)
-                )
-                await session.execute(update_query)
-
+                cleanup = await enqueue_outbox(session, RESERVATION_CLEANUP, ticket_id)
+                pending_ids = [cleanup.id]
+            else:
+                pending_ids = await cancel_reservation(session, ticket)
             await session.commit()
-
-            await RedisKeys.refund_inventory_idempotent(
-                redis=redis, ticket_type_id=ticket_type_id, ticket_id=ticket.id
-            )
-
-            logger.info(
-                f"后台回收：票据 {ticket_id} 因超时已取消（CANCELED），库存回补完成"
-            )
-        except Exception as e:
+        except BaseException:
             await session.rollback()
-            logger.error(f"后台回收：票据 {ticket_id} 释放失败，错误：{e}")
             raise
+        dispatcher = transaction_outbox(session, redis, ctx.get("cache_redis"))
+
+    for pending_id in pending_ids:
+        await dispatcher.dispatch_best_effort(pending_id)
+    logger.info("后台回收：票据 %s 状态已确认，后续同步可恢复", ticket_id)
 
 
 async def reconcile_hung_tickets(ctx: dict[Any, Any]) -> None:
-    """定时扫描数据库中超过预留期限的 RESERVED 票据，补偿遗漏的延迟任务。
-
-    批量取消票据并按票种减少占用数量，提交数据库后逐张幂等回补 Redis 库存。
-    """
-    session_maker = ctx["session_maker"]
-    redis: Redis = ctx["business_redis"]
-
+    """最多扫描 100 张超时票据，每票独立事务；一轮最多执行 5 秒。"""
     threshold = datetime.now(UTC) - timedelta(
         seconds=settings.TICKET_RESERVATION_TIME_SECONDS
     )
-
-    async with session_maker() as session:
-        cancel_query = (
-            update(Ticket)
-            .where(Ticket.status == TicketStatus.RESERVED)
-            .where(Ticket.created_at <= threshold)
-            .values(status=TicketStatus.CANCELED)
-            .returning(Ticket.id, Ticket.ticket_type_id)
-        )
-        result = await session.execute(cancel_query)
-        canceled_tickets = result.all()
-
-        if not canceled_tickets:
-            return
-
-        logger.info(f"定时补偿：发现 {len(canceled_tickets)} 张超时未支付的票据")
-
-        type_count = Counter(t.ticket_type_id for t in canceled_tickets)
-
-        for ticket_type_id, count in type_count.items():
-            refund_query = (
-                update(TicketType)
-                .where(TicketType.id == ticket_type_id)
-                .values(tickets_sold=TicketType.tickets_sold - count)
-            )
-            await session.execute(refund_query)
-
-        await session.commit()
-
-        for ticket_id, ticket_type_id in canceled_tickets:
-            await RedisKeys.refund_inventory_idempotent(
-                redis=redis, ticket_type_id=ticket_type_id, ticket_id=ticket_id
-            )
-
-        logger.info("定时补偿完成：数据库占用数量和 Redis 库存已更新")
+    try:
+        async with asyncio.timeout(5):
+            async with ctx["session_maker"]() as session:
+                ids = list(
+                    await session.scalars(
+                        select(Ticket.id)
+                        .where(
+                            Ticket.status == TicketStatus.RESERVED,
+                            Ticket.created_at <= threshold,
+                        )
+                        .order_by(Ticket.created_at, Ticket.id)
+                        .limit(100)
+                    )
+                )
+            for ticket_id in ids:
+                try:
+                    await release_unpaid_ticket(ctx, ticket_id)
+                except Exception:
+                    logger.exception("超时票据处理失败，继续下一张 id=%s", ticket_id)
+    except TimeoutError:
+        logger.warning("超时预订扫描达到 5 秒预算，剩余票据留待下轮")
 
 
 async def reconcile_redis_orphans(ctx: dict[Any, Any]) -> None:
-    """排查 Redis 中没有有效数据库预订对应的异常占用。
+    """按游标重建库存副本并清理旧预订标记，不根据 Redis 记录增加库存。
 
-    预留 60 秒宽限期以避开尚未提交的事务；数据库票据不存在或已取消时，幂等回补库存。
+    一轮最多投影 100 个票种、核对 100 个哈希字段，总预算为 5 秒。
     """
-    session_maker = ctx["session_maker"]
-    redis: Redis = ctx["business_redis"]
+    try:
+        async with asyncio.timeout(5):
+            await _reconcile_inventory(ctx)
+            await _cleanup_legacy_reservations(ctx)
+    except TimeoutError:
+        logger.warning("库存副本核对达到 5 秒预算，剩余项目留待下轮")
 
-    active_redis_locks = await RedisKeys.get_all_active_reservations(redis)
 
-    if not active_redis_locks:
-        return
-
-    current_time = int(time.time())
-    GRACE_PERIOD_SECONDS = 60
-
-    suspicious_locks = [
-        lock
-        for lock in active_redis_locks
-        if (current_time - lock["timestamp"]) > GRACE_PERIOD_SECONDS
-    ]
-
-    if not suspicious_locks:
-        return
-
-    redis_ticket_ids = [lock["ticket_id"] for lock in suspicious_locks]
-
-    async with session_maker() as session:
-        query = select(Ticket.id, Ticket.status).where(Ticket.id.in_(redis_ticket_ids))
-        result = await session.execute(query)
-        db_tickets = {row.id: row.status for row in result.all()}
-
-    orphaned_locks = []
-
-    for lock in suspicious_locks:
-        ticket_id = lock["ticket_id"]
-        db_status = db_tickets.get(ticket_id)
-
-        if db_status is None or db_status == TicketStatus.CANCELED:
-            orphaned_locks.append(lock)
-
-    logger.info(f"Redis 补偿：发现 {len(orphaned_locks)} 条异常预订占用")
-
-    if not orphaned_locks:
-        return
-
-    for lock in orphaned_locks:
-        await RedisKeys.refund_inventory_idempotent(
-            redis=redis,
-            ticket_type_id=lock["ticket_type_id"],
-            ticket_id=lock["ticket_id"],
+async def _reconcile_inventory(ctx: dict[Any, Any]) -> None:
+    redis: RedisClient = ctx["business_redis"]
+    async with ctx["session_maker"]() as session:
+        ids = list(
+            await session.scalars(
+                select(TicketType.id)
+                .where(TicketType.id > ctx.get("inventory_reconcile_cursor", 0))
+                .order_by(TicketType.id)
+                .limit(100)
+            )
         )
+    if not ids:
+        ctx["inventory_reconcile_cursor"] = 0
+        return
+    for ticket_type_id in ids:
+        async with ctx["session_maker"]() as session:
+            try:
+                await project_inventory(session, redis, ticket_type_id)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                logger.exception("库存副本投影失败，继续下一票种 id=%s", ticket_type_id)
+            except BaseException:
+                await session.rollback()
+                raise
+        # 单个坏记录不阻塞后续票种；下次完整游标轮转时仍会重试。
+        ctx["inventory_reconcile_cursor"] = ticket_type_id
 
-    logger.info("Redis 补偿完成：异常预订占用已回补")
+
+async def _cleanup_legacy_reservations(ctx: dict[Any, Any]) -> None:
+    redis: RedisClient = ctx["business_redis"]
+    pending: deque[str] = ctx.setdefault("legacy_reservation_fields", deque())
+    if not pending:
+        async with asyncio.timeout(settings.TRANSACTION_REDIS_TIMEOUT_SECONDS):
+            cursor, fields = await redis.hscan(
+                RedisKeys.active_reservations_hash(),
+                cursor=ctx.get("legacy_reservation_cursor", 0),
+                count=100,
+            )
+        ctx["legacy_reservation_cursor"] = cursor
+        # COUNT 为提示；保留整页溢出字段，下轮继续且不丢弃游标进度。
+        pending.extend(fields)
+    batch = [pending.popleft() for _ in range(min(len(pending), 100))]
+    if not batch:
+        return
+    ids: dict[str, int] = {}
+    for field in batch:
+        try:
+            ticket_id = int(field)
+        except (ValueError, TypeError):
+            continue
+        if ticket_id > 0 and str(ticket_id) == field:
+            ids[field] = ticket_id
+    async with ctx["session_maker"]() as session:
+        result = await session.execute(
+            select(Ticket.id, Ticket.status).where(Ticket.id.in_(ids.values()))
+        )
+        statuses = dict(result.all())
+    cleanup = [
+        field
+        for field in batch
+        if field not in ids or statuses.get(ids[field]) != TicketStatus.RESERVED
+    ]
+    if cleanup:
+        async with asyncio.timeout(settings.TRANSACTION_REDIS_TIMEOUT_SECONDS):
+            await cast(
+                Awaitable[int],
+                redis.hdel(RedisKeys.active_reservations_hash(), *cleanup),
+            )
+
+
+async def process_outbox(ctx: dict[Any, Any]) -> None:
+    """每轮处理最多 100 项到期待办，活动失效、库存投影与标记清理共用入口。"""
+    async with ctx["session_maker"]() as session:
+        dispatcher = transaction_outbox(
+            session, ctx["business_redis"], ctx.get("cache_redis")
+        )
+    await dispatcher.dispatch_batch(batch_size=100, time_budget_seconds=5)
 
 
 class WorkerSettings:
@@ -250,6 +268,7 @@ class WorkerSettings:
 
     cron_jobs = [
         cron(warm_hot_events, second=10, unique=True, timeout=25),
-        cron(reconcile_hung_tickets, minute=set(range(0, 60, 5))),
-        cron(reconcile_redis_orphans, minute=set(range(2, 60, 5))),
+        cron(process_outbox, second=set(range(0, 60, 10)), unique=True, timeout=10),
+        cron(reconcile_hung_tickets, minute=set(range(0, 60, 5)), timeout=10),
+        cron(reconcile_redis_orphans, minute=set(range(2, 60, 5)), timeout=10),
     ]

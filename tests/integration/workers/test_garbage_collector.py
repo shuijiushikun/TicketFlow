@@ -1,12 +1,12 @@
-import time
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+"""真实测试 PostgreSQL 的 worker 业务检查；外部资源运行需根夹具隔离授权。"""
+
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core import settings
 from src.core.redis_keys import RedisKeys
@@ -20,6 +20,27 @@ from src.worker import (
 from tests.factories import TicketFactory
 
 
+def worker_context(session: AsyncSession, redis: AsyncMock) -> dict[str, Any]:
+    return {
+        "session_maker": async_sessionmaker(session.bind, expire_on_commit=False),
+        "business_redis": redis,
+    }
+
+
+def assert_projection(
+    redis: AsyncMock, ticket_type_id: int, version: int, available: int
+) -> None:
+    redis.eval.assert_awaited_once()
+    assert redis.eval.await_args is not None
+    assert redis.eval.await_args.args[1:] == (
+        2,
+        RedisKeys.ticket_type_inventory(ticket_type_id),
+        RedisKeys.inventory_version(ticket_type_id),
+        str(version).zfill(20),
+        str(available),
+    )
+
+
 @pytest.mark.asyncio
 class TestGarbageCollector:
     async def test_reconcile_hung_tickets_restores_inventory_in_db_and_redis(
@@ -29,70 +50,32 @@ class TestGarbageCollector:
         db_connection: AsyncSession,
     ) -> None:
         ticket_type_in_db.tickets_sold = 1
+        ticket_type_in_db.inventory_version = 0
         ticket_in_db.status = TicketStatus.RESERVED
-
-        db_connection.add_all([ticket_in_db, ticket_type_in_db])
-        await db_connection.commit()
-
-        past_time = datetime.now(UTC) - timedelta(minutes=20)
-        await db_connection.execute(
-            update(Ticket)
-            .where(Ticket.id == ticket_in_db.id)
-            .values(created_at=past_time)
+        ticket_in_db.created_at = datetime.now(UTC) - timedelta(
+            seconds=settings.TICKET_RESERVATION_TIME_SECONDS + 1
         )
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ticket_id, type_id = ticket_in_db.id, ticket_type_in_db.id
         mock_redis = AsyncMock()
+        await reconcile_hung_tickets(worker_context(db_connection, mock_redis))
 
-        ctx = {
-            "session_maker": mock_session_maker,
-            "business_redis": mock_redis,
-        }
-
-        await reconcile_hung_tickets(ctx)
-
-        db_connection.expunge_all()
-
-        updated_ticket = await db_connection.get(Ticket, ticket_in_db.id)
+        updated_ticket = await db_connection.get(
+            Ticket, ticket_id, populate_existing=True
+        )
         assert updated_ticket is not None
         assert updated_ticket.status == TicketStatus.CANCELED
+        updated_type = await db_connection.get(
+            TicketType, type_id, populate_existing=True
+        )
+        assert updated_type is not None and updated_type.tickets_sold == 0
+        assert updated_type.inventory_version == 1
+        assert_projection(mock_redis, type_id, 1, updated_type.tickets_quantity)
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), str(ticket_id)
+        )
 
-        updated_ticket_type = await db_connection.get(TicketType, ticket_type_in_db.id)
-        assert updated_ticket_type is not None
-        assert updated_ticket_type.tickets_sold == 0
-
-        inventory_key = RedisKeys.ticket_type_inventory(ticket_type_in_db.id)
-        canceled_set_key = RedisKeys.canceled_tickets_set()
-        active_hash_key = RedisKeys.active_reservations_hash()
-
-        assert mock_redis.eval.call_count == 1
-
-        call_args = mock_redis.eval.call_args
-        assert call_args is not None
-
-        (
-            passed_script,
-            numkeys,
-            passed_inv_key,
-            passed_set_key,
-            passed_active_hash,
-            passed_ticket_id,
-        ) = call_args.args
-
-        assert numkeys == 3
-        assert passed_inv_key == inventory_key
-        assert passed_set_key == canceled_set_key
-        assert passed_active_hash == active_hash_key
-        assert int(passed_ticket_id) == ticket_in_db.id
-        assert "SISMEMBER" in passed_script
-        assert "INCR" in passed_script
-        assert "HDEL" in passed_script
-
-    async def test_grace_ignores_fresh_reservation(
+    async def test_ignores_unexpired_reservation(
         self,
         ticket_type_in_db: TicketType,
         ticket_in_db: Ticket,
@@ -100,66 +83,33 @@ class TestGarbageCollector:
     ) -> None:
         ticket_type_in_db.tickets_sold = 1
         ticket_in_db.status = TicketStatus.RESERVED
-
-        db_connection.add_all([ticket_in_db, ticket_type_in_db])
+        ticket_in_db.created_at = datetime.now(UTC)
         await db_connection.commit()
-
-        recent_time = datetime.now(UTC) - timedelta(
-            seconds=settings.TICKET_RESERVATION_TIME_SECONDS - 1
+        ticket_id, type_id = ticket_in_db.id, ticket_type_in_db.id
+        mock_redis = AsyncMock()
+        await reconcile_hung_tickets(worker_context(db_connection, mock_redis))
+        updated = await db_connection.get(Ticket, ticket_id, populate_existing=True)
+        assert updated is not None and updated.status == TicketStatus.RESERVED
+        updated_type = await db_connection.get(
+            TicketType, type_id, populate_existing=True
         )
-        await db_connection.execute(
-            update(Ticket)
-            .where(Ticket.id == ticket_in_db.id)
-            .values(created_at=recent_time)
-        )
-        await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
-        ctx = {"session_maker": mock_session_maker, "business_redis": AsyncMock()}
-        await reconcile_hung_tickets(ctx)
-
-        db_connection.expunge_all()
-
-        updated_ticket = await db_connection.get(Ticket, ticket_in_db.id)
-        assert updated_ticket is not None
-        assert updated_ticket.status == TicketStatus.RESERVED
-
-        updated_ticket_type = await db_connection.get(TicketType, ticket_type_in_db.id)
-        assert updated_ticket_type is not None
-        assert updated_ticket_type.tickets_sold == 1
+        assert updated_type is not None and updated_type.tickets_sold == 1
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_not_awaited()
 
     async def test_status_lock_ignores_paid_tickets(
-        self,
-        ticket_in_db: Ticket,
-        db_connection: AsyncSession,
+        self, ticket_in_db: Ticket, db_connection: AsyncSession
     ) -> None:
         ticket_in_db.status = TicketStatus.SOLD
-        db_connection.add(ticket_in_db)
+        ticket_in_db.created_at = datetime.now(UTC) - timedelta(days=1)
         await db_connection.commit()
-
-        very_past_time = datetime.now(UTC) - timedelta(hours=2)
-        await db_connection.execute(
-            update(Ticket)
-            .where(Ticket.id == ticket_in_db.id)
-            .values(created_at=very_past_time)
-        )
-        await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
-        ctx = {"session_maker": mock_session_maker, "business_redis": AsyncMock()}
-        await reconcile_hung_tickets(ctx)
-
-        db_connection.expunge_all()
-
-        update_ticket = await db_connection.get(Ticket, ticket_in_db.id)
-        assert update_ticket is not None
-        assert update_ticket.status == TicketStatus.SOLD
+        ticket_id = ticket_in_db.id
+        mock_redis = AsyncMock()
+        await reconcile_hung_tickets(worker_context(db_connection, mock_redis))
+        updated = await db_connection.get(Ticket, ticket_id, populate_existing=True)
+        assert updated is not None and updated.status == TicketStatus.SOLD
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_not_awaited()
 
     async def test_bulk_processing_consistency(
         self,
@@ -168,61 +118,40 @@ class TestGarbageCollector:
         user_in_db: User,
     ) -> None:
         ticket_type_in_db.tickets_sold = 5
-        db_connection.add(ticket_type_in_db)
-        await db_connection.flush()
-
+        ticket_type_in_db.inventory_version = 0
         tickets = TicketFactory.batch(
             size=5, ticket_type=ticket_type_in_db, owner=user_in_db
         )
-        for i in range(4):
-            tickets[i].status = TicketStatus.RESERVED
+        for ticket in tickets:
+            ticket.status = TicketStatus.RESERVED
+            ticket.created_at = datetime.now(UTC) - timedelta(days=1)
+        tickets[3].created_at = datetime.now(UTC)
         tickets[4].status = TicketStatus.SOLD
-
         db_connection.add_all(tickets)
         await db_connection.commit()
-
-        time_past = datetime.now(UTC) - timedelta(days=1)
-        time_recent = datetime.now(UTC) - timedelta(minutes=5)
-
-        past_ids = [tickets[0].id, tickets[1].id, tickets[2].id, tickets[4].id]
-
-        await db_connection.execute(
-            update(Ticket).where(Ticket.id.in_(past_ids)).values(created_at=time_past)
-        )
-
-        await db_connection.execute(
-            update(Ticket)
-            .where(Ticket.id == tickets[3].id)
-            .values(created_at=time_recent)
-        )
-        await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ids = [ticket.id for ticket in tickets]
+        type_id = ticket_type_in_db.id
         mock_redis = AsyncMock()
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_hung_tickets(ctx)
+        await reconcile_hung_tickets(worker_context(db_connection, mock_redis))
 
-        db_connection.expunge_all()
-
-        query = select(Ticket).where(Ticket.ticket_type_id == ticket_type_in_db.id)
-        db_tickets: Sequence[Ticket] = (await db_connection.scalars(query)).all()
-
-        status_map = {t.id: t.status for t in db_tickets}
-
-        assert status_map[tickets[0].id] == TicketStatus.CANCELED
-        assert status_map[tickets[1].id] == TicketStatus.CANCELED
-        assert status_map[tickets[2].id] == TicketStatus.CANCELED
-        assert status_map[tickets[3].id] == TicketStatus.RESERVED
-        assert status_map[tickets[4].id] == TicketStatus.SOLD
-
-        updated_ticket_type = await db_connection.get(TicketType, ticket_type_in_db.id)
-        assert updated_ticket_type is not None
-        assert updated_ticket_type.tickets_sold == 2
-
-        assert mock_redis.eval.call_count == 3
+        result = await db_connection.execute(
+            select(Ticket.id, Ticket.status).where(Ticket.id.in_(ids))
+        )
+        status_map = {ticket_id: status for ticket_id, status in result.all()}
+        assert [status_map[ticket_id] for ticket_id in ids] == [
+            TicketStatus.CANCELED,
+            TicketStatus.CANCELED,
+            TicketStatus.CANCELED,
+            TicketStatus.RESERVED,
+            TicketStatus.SOLD,
+        ]
+        updated_type = await db_connection.get(
+            TicketType, type_id, populate_existing=True
+        )
+        assert updated_type is not None and updated_type.tickets_sold == 2
+        assert updated_type.inventory_version == 3
+        assert mock_redis.eval.await_count == 3
+        assert mock_redis.hdel.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -234,133 +163,93 @@ class TestReleaseUnpaidTicketWorker:
         ticket_type_in_db: TicketType,
     ) -> None:
         ticket_type_in_db.tickets_sold = 1
-        db_connection.add(ticket_type_in_db)
-        await db_connection.flush()
-
+        ticket_type_in_db.inventory_version = 0
         ticket = TicketFactory.build(
             ticket_type=ticket_type_in_db,
             owner=user_in_db,
             status=TicketStatus.RESERVED,
+            created_at=datetime.now(UTC) - timedelta(days=1),
         )
         db_connection.add(ticket)
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ticket_id, type_id = ticket.id, ticket_type_in_db.id
         mock_redis = AsyncMock()
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
+        await release_unpaid_ticket(
+            worker_context(db_connection, mock_redis), ticket_id
+        )
 
-        await release_unpaid_ticket(ctx, ticket_id=ticket.id)
+        updated = await db_connection.get(Ticket, ticket_id, populate_existing=True)
+        assert updated is not None and updated.status == TicketStatus.CANCELED
+        updated_type = await db_connection.get(
+            TicketType, type_id, populate_existing=True
+        )
+        assert updated_type is not None and updated_type.tickets_sold == 0
+        assert_projection(mock_redis, type_id, 1, updated_type.tickets_quantity)
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), str(ticket_id)
+        )
 
-        db_connection.expunge_all()
-
-        updated_ticket = await db_connection.get(Ticket, ticket.id)
-        assert updated_ticket is not None
-        assert updated_ticket.status == TicketStatus.CANCELED
-
-        updated_ticket_type = await db_connection.get(TicketType, ticket_type_in_db.id)
-        assert updated_ticket_type is not None
-        assert updated_ticket_type.tickets_sold == 0
-
-        assert mock_redis.eval.call_count == 1
-
-    async def test_ignores_already_paid_ticket(
+    async def test_paid_ticket_only_cleans_legacy_marker(
         self,
         user_in_db: User,
         db_connection: AsyncSession,
         ticket_type_in_db: TicketType,
     ) -> None:
         ticket_type_in_db.tickets_sold = 1
-        db_connection.add(ticket_type_in_db)
-        await db_connection.flush()
-
         ticket = TicketFactory.build(
-            ticket_type=ticket_type_in_db,
-            owner=user_in_db,
-            status=TicketStatus.SOLD,
+            ticket_type=ticket_type_in_db, owner=user_in_db, status=TicketStatus.SOLD
         )
         db_connection.add(ticket)
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ticket_id, type_id = ticket.id, ticket_type_in_db.id
         mock_redis = AsyncMock()
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await release_unpaid_ticket(ctx, ticket_id=ticket.id)
-
-        db_connection.expunge_all()
-
-        updated_ticket = await db_connection.get(Ticket, ticket.id)
-        assert updated_ticket is not None
-        assert updated_ticket.status == TicketStatus.SOLD
-
-        updated_ticket_type = await db_connection.get(TicketType, ticket_type_in_db.id)
-        assert updated_ticket_type is not None
-        assert updated_ticket_type.tickets_sold == 1
-
-        assert mock_redis.eval.call_count == 0
+        await release_unpaid_ticket(
+            worker_context(db_connection, mock_redis), ticket_id
+        )
+        updated = await db_connection.get(Ticket, ticket_id, populate_existing=True)
+        assert updated is not None and updated.status == TicketStatus.SOLD
+        updated_type = await db_connection.get(
+            TicketType, type_id, populate_existing=True
+        )
+        assert updated_type is not None and updated_type.tickets_sold == 1
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), str(ticket_id)
+        )
 
     async def test_ignores_non_existent_ticket(
-        self,
-        db_connection: AsyncSession,
+        self, db_connection: AsyncSession
     ) -> None:
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
         mock_redis = AsyncMock()
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-
-        await release_unpaid_ticket(ctx, ticket_id=999)
-
-        assert mock_redis.eval.call_count == 0
+        await release_unpaid_ticket(worker_context(db_connection, mock_redis), 999)
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 class TestReconcileRedisOrphansWorker:
-    async def test_refunds_ghost_ticket_missing_in_db(
-        self,
-        db_connection: AsyncSession,
+    async def test_cleans_ghost_marker_without_inventing_inventory(
+        self, db_connection: AsyncSession
     ) -> None:
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
         mock_redis = AsyncMock()
+        mock_redis.hscan.return_value = (0, {"999": "5:1"})
+        await reconcile_redis_orphans(worker_context(db_connection, mock_redis))
+        mock_redis.hscan.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), cursor=0, count=100
+        )
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), "999"
+        )
 
-        past_time = int(time.time()) - 100
-        mock_redis.hgetall.return_value = {b"999": f"5:{past_time}".encode()}
-
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_redis_orphans(ctx)
-
-        assert mock_redis.eval.call_count == 1
-
-        call_args = mock_redis.eval.call_args
-        assert call_args is not None
-        (
-            passed_script,
-            numkeys,
-            passed_inv_key,
-            passed_set_key,
-            passed_active_hash,
-            passed_ticket_id,
-        ) = call_args.args
-
-        assert passed_inv_key == RedisKeys.ticket_type_inventory(5)
-        assert passed_active_hash == RedisKeys.active_reservations_hash()
-        assert int(passed_ticket_id) == 999
-
-    async def test_refunds_canceled_ticket_with_stuck_lock(
+    async def test_canceled_ticket_projects_current_database_quantity(
         self,
         db_connection: AsyncSession,
         user_in_db: User,
         ticket_type_in_db: TicketType,
     ) -> None:
+        ticket_type_in_db.tickets_sold = 0
+        ticket_type_in_db.inventory_version = 0
         ticket = TicketFactory.build(
             ticket_type=ticket_type_in_db,
             owner=user_in_db,
@@ -368,47 +257,37 @@ class TestReconcileRedisOrphansWorker:
         )
         db_connection.add(ticket)
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ticket_id, type_id = ticket.id, ticket_type_in_db.id
         mock_redis = AsyncMock()
-        past_time = int(time.time()) - 100
-        mock_redis.hgetall.return_value = {
-            str(ticket.id).encode(
-                "utf-8"
-            ): f"{ticket_type_in_db.id}:{past_time}".encode()
-        }
+        mock_redis.hscan.return_value = (0, {str(ticket_id): f"{type_id}:1"})
+        await reconcile_redis_orphans(worker_context(db_connection, mock_redis))
+        assert_projection(mock_redis, type_id, 0, ticket_type_in_db.tickets_quantity)
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), str(ticket_id)
+        )
 
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_redis_orphans(ctx)
-
-        assert mock_redis.eval.call_count == 1
-
-    async def test_ignores_fresh_reservation_grace_period(
-        self,
-        db_connection: AsyncSession,
+    async def test_fresh_missing_marker_does_not_need_fixed_grace_period(
+        self, db_connection: AsyncSession
     ) -> None:
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
         mock_redis = AsyncMock()
-        fresh_time = int(time.time()) - 10
-        mock_redis.hgetall.return_value = {b"999": f"1:{fresh_time}".encode()}
+        mock_redis.hscan.return_value = (
+            0,
+            {"999": f"1:{int(datetime.now(UTC).timestamp())}"},
+        )
+        await reconcile_redis_orphans(worker_context(db_connection, mock_redis))
+        mock_redis.eval.assert_not_awaited()
+        mock_redis.hdel.assert_awaited_once_with(
+            RedisKeys.active_reservations_hash(), "999"
+        )
 
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_redis_orphans(ctx)
-
-        assert mock_redis.eval.call_count == 0
-
-    async def test_ignores_valid_db_ticket(
+    async def test_preserves_marker_for_valid_reserved_ticket(
         self,
         db_connection: AsyncSession,
         user_in_db: User,
         ticket_type_in_db: TicketType,
     ) -> None:
+        ticket_type_in_db.tickets_sold = 1
+        ticket_type_in_db.inventory_version = 0
         ticket = TicketFactory.build(
             ticket_type=ticket_type_in_db,
             owner=user_in_db,
@@ -416,23 +295,16 @@ class TestReconcileRedisOrphansWorker:
         )
         db_connection.add(ticket)
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        ticket_id, type_id = ticket.id, ticket_type_in_db.id
         mock_redis = AsyncMock()
-        past_time = int(time.time()) - 100
-        mock_redis.hgetall.return_value = {
-            str(ticket.id).encode(
-                "utf-8"
-            ): f"{ticket_type_in_db.id}:{past_time}".encode()
-        }
-
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_redis_orphans(ctx)
-
-        assert mock_redis.eval.call_count == 0
+        mock_redis.hscan.return_value = (0, {str(ticket_id): f"{type_id}:1"})
+        await reconcile_redis_orphans(worker_context(db_connection, mock_redis))
+        assert_projection(
+            mock_redis, type_id, 0, ticket_type_in_db.tickets_quantity - 1
+        )
+        mock_redis.hdel.assert_not_awaited()
+        updated = await db_connection.get(Ticket, ticket_id, populate_existing=True)
+        assert updated is not None and updated.status == TicketStatus.RESERVED
 
     async def test_mixed_state_bulk_processing(
         self,
@@ -440,39 +312,40 @@ class TestReconcileRedisOrphansWorker:
         user_in_db: User,
         ticket_type_in_db: TicketType,
     ) -> None:
-        t_valid = TicketFactory.build(
-            ticket_type=ticket_type_in_db,
-            owner=user_in_db,
-            status=TicketStatus.RESERVED,
-        )
-        t_canceled = TicketFactory.build(
-            ticket_type=ticket_type_in_db,
-            owner=user_in_db,
-            status=TicketStatus.CANCELED,
-        )
-
-        db_connection.add_all([t_valid, t_canceled])
+        ticket_type_in_db.tickets_sold = 2
+        ticket_type_in_db.inventory_version = 0
+        tickets = [
+            TicketFactory.build(
+                ticket_type=ticket_type_in_db, owner=user_in_db, status=s
+            )
+            for s in (TicketStatus.RESERVED, TicketStatus.CANCELED, TicketStatus.SOLD)
+        ]
+        db_connection.add_all(tickets)
         await db_connection.commit()
-
-        @asynccontextmanager
-        async def mock_session_maker() -> AsyncIterator[AsyncSession]:
-            yield db_connection
-
+        reserved_id, canceled_id, sold_id = [ticket.id for ticket in tickets]
+        type_id = ticket_type_in_db.id
         mock_redis = AsyncMock()
-
-        past = int(time.time()) - 100
-        fresh = int(time.time()) - 5
-
-        mock_redis.hgetall.return_value = {
-            str(t_valid.id).encode("utf-8"): f"{ticket_type_in_db.id}:{past}".encode(),
-            str(t_canceled.id).encode(
-                "utf-8"
-            ): f"{ticket_type_in_db.id}:{past}".encode(),
-            b"999": f"{ticket_type_in_db.id}:{past}".encode(),
-            b"888": f"{ticket_type_in_db.id}:{fresh}".encode(),
+        mock_redis.hscan.return_value = (
+            0,
+            {
+                str(reserved_id): f"{type_id}:1",
+                str(canceled_id): f"{type_id}:1",
+                str(sold_id): f"{type_id}:1",
+                "999": f"{type_id}:1",
+                "888": f"{type_id}:{int(datetime.now(UTC).timestamp())}",
+                "bad": "invalid",
+            },
+        )
+        await reconcile_redis_orphans(worker_context(db_connection, mock_redis))
+        assert_projection(
+            mock_redis, type_id, 0, ticket_type_in_db.tickets_quantity - 2
+        )
+        mock_redis.hdel.assert_awaited_once()
+        assert mock_redis.hdel.await_args is not None
+        assert set(mock_redis.hdel.await_args.args[1:]) == {
+            str(canceled_id),
+            str(sold_id),
+            "999",
+            "888",
+            "bad",
         }
-
-        ctx = {"session_maker": mock_session_maker, "business_redis": mock_redis}
-        await reconcile_redis_orphans(ctx)
-
-        assert mock_redis.eval.call_count == 2

@@ -1,7 +1,7 @@
 import enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin
@@ -29,6 +29,7 @@ class Ticket(Base, TimestampMixin):
     """分配给用户的具体票据，关联一个用户和一个票种，并记录当前状态。"""
 
     __tablename__ = "tickets"
+    __table_args__ = (Index("ix_tickets_expiry", "status", "created_at", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
 

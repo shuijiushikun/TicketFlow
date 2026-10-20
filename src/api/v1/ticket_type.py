@@ -38,7 +38,7 @@ async def ticket_type_create(
     """创建票种并初始化库存。
 
     仅管理员可操作。指定活动 ID、票种名称、以分计价的价格和总票数。
-    成功后保存票种，同时初始化 Redis 可用库存。
+    保存票种及持久化同步待办，提交后尝试初始化 Redis 库存副本，失败由后台恢复。
     """
     return await ticket_type_service.create(
         event_id=ticket_type_data.event_id, type_data=ticket_type_data

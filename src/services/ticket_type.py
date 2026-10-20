@@ -7,25 +7,26 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import logger
-from src.core.cache_runtime import cache_circuit
-from src.core.cache_store import EventCacheStore
 from src.core.exception import (
     TicketTypeDeleteError,
     TicketTypeNotFoundError,
     TicketTypeQuantity,
 )
-from src.core.redis_keys import RedisClient, RedisKeys
-from src.models import TicketType
+from src.core.redis_keys import RedisClient
+from src.models import Ticket, TicketType
 from src.schemas.ticket_type import (
     TicketTypeCreate,
     TicketTypeDetailResponse,
     TicketTypeResponse,
     TicketTypeUpdate,
 )
+from src.services.inventory import INVENTORY_SYNC, transaction_outbox
+from src.services.outbox import EVENT_CACHE_INVALIDATE, enqueue_outbox
+from src.services.transactions import commit_business
 
 
 class TicketTypeService:
-    """票种业务层，处理定价、容量限制和 Redis 库存初始化及更新。"""
+    """数据库行锁协调管理员修改与购票，副作用通过事务待办恢复。"""
 
     def __init__(
         self,
@@ -36,17 +37,32 @@ class TicketTypeService:
     ) -> None:
         self.db = session
         self.redis = redis
-        self.event_cache = EventCacheStore(
-            cache_redis if cache_redis is not None else redis, cache_circuit
+        self.outbox = transaction_outbox(session, redis, cache_redis)
+
+    async def _pending(self, ticket_type_id: int, event_id: int) -> list[int]:
+        sync = await enqueue_outbox(self.db, INVENTORY_SYNC, ticket_type_id)
+        invalidate = await enqueue_outbox(self.db, EVENT_CACHE_INVALIDATE, event_id)
+        return [sync.id, invalidate.id]
+
+    async def _deliver(self, pending_ids: list[int]) -> None:
+        for pending_id in pending_ids:
+            await self.outbox.dispatch_best_effort(pending_id)
+
+    async def _locked(self, ticket_type_id: int) -> TicketType:
+        ticket_type = await self.db.scalar(
+            select(TicketType)
+            .where(TicketType.id == ticket_type_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        if ticket_type is None:
+            raise TicketTypeNotFoundError("票种不存在")
+        return ticket_type
 
     async def create(
         self, event_id: int, type_data: TicketTypeCreate
     ) -> TicketTypeResponse:
-        """为 event_id 对应活动创建票种，并按总票数初始化 Redis 可用库存。
-
-        type_data 提供票种参数；提交后清理活动详情和列表缓存，返回票种响应。
-        """
+        """创建票种，库存同步和活动缓存失效与业务同事务登记。"""
         type_dict = type_data.model_dump()
 
         type_dict["event_id"] = event_id
@@ -55,20 +71,17 @@ class TicketTypeService:
         self.db.add(new_ticket_type)
 
         try:
-            await self.db.commit()
-            await self.db.refresh(new_ticket_type)
-
-            inventory_key = RedisKeys.ticket_type_inventory(new_ticket_type.id)
-            await self.redis.set(inventory_key, new_ticket_type.tickets_quantity)
-
-            await self.event_cache.invalidate(event_id)
-
-            logger.info(f"票种创建成功，票种 ID：{new_ticket_type.id}")
+            await self.db.flush()
+            pending_ids = await self._pending(new_ticket_type.id, event_id)
+            response = TicketTypeResponse.model_validate(new_ticket_type)
+            await commit_business(self.db, response)
         except SQLAlchemyError:
             await self.db.rollback()
             raise
 
-        return TicketTypeResponse.model_validate(new_ticket_type, from_attributes=True)
+        await self._deliver(pending_ids)
+        logger.info(f"票种创建成功，票种 ID：{response.id}")
+        return response
 
     async def get(self, ticket_type_id: int) -> TicketTypeDetailResponse:
         """按票种 ID 查询详情及已占用数量；不存在时抛出 TicketTypeNotFoundError。"""
@@ -97,21 +110,24 @@ class TicketTypeService:
 
     async def delete(self, ticket_type_id: int) -> None:
         """删除票种并清理库存及活动缓存；已有关联票据时拒绝删除。"""
-        ticket_type = await self.db.get(TicketType, ticket_type_id)
-
-        if not ticket_type:
-            raise TicketTypeNotFoundError("票种不存在")
+        ticket_type = await self._locked(ticket_type_id)
 
         try:
             event_id = ticket_type.event_id
 
+            # 只读核对关联；避免 ORM 先修改 Ticket 外键，反转取消链路的锁顺序。
+            associated = await self.db.scalar(
+                select(Ticket.id)
+                .where(Ticket.ticket_type_id == ticket_type_id)
+                .limit(1)
+            )
+            if associated is not None:
+                raise TicketTypeDeleteError("票种已存在关联票据，无法删除")
+
             await self.db.delete(ticket_type)
-            await self.db.commit()
-
-            await self.redis.delete(RedisKeys.ticket_type_inventory(ticket_type_id))
-            await self.event_cache.invalidate(event_id)
-
-            logger.info(f"票种删除成功，票种 ID：{ticket_type_id}")
+            await self.db.flush()
+            pending_ids = await self._pending(ticket_type_id, event_id)
+            await commit_business(self.db)
         except IntegrityError as e:
             await self.db.rollback()
             logger.warning(f"票种 {ticket_type_id} 已存在关联票据，无法删除")
@@ -119,6 +135,9 @@ class TicketTypeService:
         except SQLAlchemyError:
             await self.db.rollback()
             raise
+
+        await self._deliver(pending_ids)
+        logger.info(f"票种删除成功，票种 ID：{ticket_type_id}")
 
     async def update(
         self, ticket_type_id: int, update_data: TicketTypeUpdate
@@ -128,12 +147,9 @@ class TicketTypeService:
         update_data 只包含本次需要修改的字段。总票数不能小于预留与已售出的占用数量，
         否则抛出 TicketTypeQuantity；数据库异常时回滚。
         """
-        ticket_type = await self.db.get(TicketType, ticket_type_id)
+        ticket_type = await self._locked(ticket_type_id)
 
-        if not ticket_type:
-            raise TicketTypeNotFoundError("票种不存在")
-
-        update_dict = update_data.model_dump(exclude_unset=True)
+        update_dict = update_data.model_dump(exclude_unset=True, exclude_none=True)
         if not update_dict:
             return TicketTypeResponse.model_validate(ticket_type, from_attributes=True)
 
@@ -146,23 +162,17 @@ class TicketTypeService:
 
         for key, value in update_dict.items():
             setattr(ticket_type, key, value)
+        if new_quantity is not None:
+            ticket_type.inventory_version += 1
 
         try:
-            await self.db.commit()
-            await self.db.refresh(ticket_type)
-
-            if new_quantity is not None:
-                inventory_key = RedisKeys.ticket_type_inventory(ticket_type.id)
-                available_tickets = (
-                    ticket_type.tickets_quantity - ticket_type.tickets_sold
-                )
-                await self.redis.set(inventory_key, available_tickets)
-
-            await self.event_cache.invalidate(ticket_type.event_id)
-
-            logger.info(f"票种更新成功，票种 ID：{ticket_type_id}")
+            pending_ids = await self._pending(ticket_type_id, ticket_type.event_id)
+            response = TicketTypeResponse.model_validate(ticket_type)
+            await commit_business(self.db, response)
         except SQLAlchemyError:
             await self.db.rollback()
             raise
 
-        return TicketTypeResponse.model_validate(ticket_type, from_attributes=True)
+        await self._deliver(pending_ids)
+        logger.info(f"票种更新成功，票种 ID：{ticket_type_id}")
+        return response

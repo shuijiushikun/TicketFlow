@@ -36,7 +36,7 @@ async def create_ticket(
 
     需要登录。请求体只需提供 ticket_type_id，票据所属用户由登录身份确定。
     预订成功后状态为 RESERVED（已预留），同时占用库存并安排超时回收任务。
-    可携带 Idempotency-Key 处理记录有效期内的重复请求。
+    同一次预订重试应携带相同 Idempotency-Key 和请求内容，复用已持久化的原响应。
     """
     return await ticket_service.create(user_id=owner.id, ticket_data=ticket)
 

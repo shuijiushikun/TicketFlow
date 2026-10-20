@@ -108,7 +108,10 @@ async def setup_test_db(
 async def clean_tables(setup_test_db: None, test_engine: AsyncEngine) -> None:
     async with AsyncSession(test_engine) as session:
         await session.execute(
-            text("TRUNCATE TABLE tickets, events, users RESTART IDENTITY CASCADE;")
+            text(
+                "TRUNCATE TABLE outbox_events, idempotency_requests, "
+                "tickets, events, users RESTART IDENTITY CASCADE;"
+            )
         )
         await session.commit()
 

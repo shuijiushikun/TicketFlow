@@ -25,7 +25,7 @@ from src.core.config import settings
 from src.core.exception import EventNotFoundError
 from src.core.redis_keys import RedisKeys
 from src.main import app
-from src.models import TicketType
+from src.models import Ticket, TicketType
 from src.repositories.event import CachedEventRepository, EventRepository
 from src.schemas.event import EventDetailResponse
 from src.schemas.ticket_type import TicketTypeCreate, TicketTypeUpdate
@@ -191,7 +191,7 @@ async def test_cache_outage_uses_bounded_database_budget() -> None:
 
 @pytest.mark.parametrize("action", ["create", "update", "delete"])
 async def test_ticket_type_mutations_invalidate_detail_and_lists(
-    cache: FakeRedis, action: str
+    cache: FakeRedis, action: str, session: AsyncSession, ticket: Ticket
 ) -> None:
     repo = repository(cache)
     await repo.get(1)
@@ -204,35 +204,35 @@ async def test_ticket_type_mutations_invalidate_detail_and_lists(
     old_list, _ = await repo.store.read(
         RedisKeys.event_list_generation(), RedisKeys.event_list(0, 20)
     )
-    ticket_type = TicketType(
-        id=1, event_id=1, name="普通票", price=100, tickets_quantity=5, tickets_sold=1
-    )
-    db = MagicMock(spec=AsyncSession)
-    db.get.return_value = ticket_type
-
-    async def refresh(value: TicketType) -> None:
-        value.id = 1
-
-    db.refresh.side_effect = refresh
-    service = TicketTypeService(db, cache)
-    await cache.set(RedisKeys.ticket_type_inventory(1), 4)
+    service = TicketTypeService(session, cache)
     if action == "create":
         await service.create(
             1,
             TicketTypeCreate(event_id=1, name="普通票", price=100, tickets_quantity=5),
         )
     elif action == "update":
-        await service.update(1, TicketTypeUpdate(price=200))
-        assert await cache.get(RedisKeys.ticket_type_inventory(1)) == "4"
+        await service.update(ticket.ticket_type_id, TicketTypeUpdate(price=200))
+        assert (
+            await cache.get(RedisKeys.ticket_type_inventory(ticket.ticket_type_id))
+            == "4"
+        )
     else:
-        await service.delete(1)
+        unused = TicketType(
+            event_id=1,
+            name="待删除票种",
+            price=100,
+            tickets_quantity=5,
+            tickets_sold=0,
+        )
+        session.add(unused)
+        await session.commit()
+        await service.delete(unused.id)
     generation, body = await repo.store.read(generation_key, detail_key)
     list_generation, list_body = await repo.store.read(
         RedisKeys.event_list_generation(), RedisKeys.event_list(0, 20)
     )
     assert generation != old_generation and body is None
     assert list_generation != old_list and list_body is None
-    db.commit.assert_awaited_once()
 
 
 async def test_query_http_errors_and_validation(

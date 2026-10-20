@@ -1,7 +1,5 @@
 """通过本地临时数据库验证票据取消、过期和异常恢复流程。"""
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -11,7 +9,7 @@ import pytest
 from fakeredis.aioredis import FakeRedis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core import settings
 from src.core.exception import TicketAlreadyPaidError, TicketReservationExpireError
@@ -35,11 +33,11 @@ pytestmark = pytest.mark.asyncio
 def worker_context(
     session: AsyncSession, business: FakeRedis, queue: FakeRedis
 ) -> dict[str, Any]:
-    @asynccontextmanager
-    async def session_maker() -> AsyncIterator[AsyncSession]:
-        yield session
-
-    return {"session_maker": session_maker, "business_redis": business, "redis": queue}
+    return {
+        "session_maker": async_sessionmaker(session.bind, expire_on_commit=False),
+        "business_redis": business,
+        "redis": queue,
+    }
 
 
 async def test_cancel_preserves_record_and_restores_inventory_once(
@@ -80,17 +78,14 @@ async def test_paid_ticket_cannot_be_canceled(
     )
 
 
-async def test_failed_redis_refund_is_recoverable_after_cancel_commit(
+async def test_failed_inventory_projection_is_recoverable_after_cancel_commit(
     session: AsyncSession, ticket: Ticket, redis_clients: tuple[FakeRedis, FakeRedis]
 ) -> None:
     business, queue = redis_clients
     with patch.object(
         business, "eval", side_effect=RedisConnectionError("unavailable")
     ):
-        with pytest.raises(RedisConnectionError):
-            await TicketService(session, queue, business).delete(
-                ticket.owner_id, ticket.id
-            )
+        await TicketService(session, queue, business).delete(ticket.owner_id, ticket.id)
     assert await session.get(Ticket, ticket.id) is not None
     assert ticket.status == TicketStatus.CANCELED
     ctx = worker_context(session, business, queue)
@@ -119,7 +114,7 @@ async def test_payment_rejects_expired_reservation_before_worker_runs(
         def now(tz: object) -> datetime:
             return now
 
-    monkeypatch.setattr("src.services.payment.datetime", Clock, raising=False)
+    monkeypatch.setattr("src.services.payment.datetime", Clock)
     monkeypatch.setattr(settings, "TICKET_RESERVATION_TIME_SECONDS", 900)
     ticket.created_at = now - timedelta(seconds=elapsed)
     await session.commit()
@@ -145,12 +140,15 @@ async def test_payment_accepts_unexpired_reservation(
     )
 
 
-async def test_worker_refunds_business_database_instead_of_queue_database(
+async def test_worker_projects_business_database_instead_of_queue_database(
     session: AsyncSession, ticket: Ticket, redis_clients: tuple[FakeRedis, FakeRedis]
 ) -> None:
     business, queue = redis_clients
+    ticket.created_at = datetime.now(UTC) - timedelta(days=1)
+    await session.commit()
     await release_unpaid_ticket(worker_context(session, business, queue), ticket.id)
     await release_unpaid_ticket(worker_context(session, business, queue), ticket.id)
+    await session.refresh(ticket)
     assert ticket.status == TicketStatus.CANCELED
     assert (
         int(await business.get(RedisKeys.ticket_type_inventory(ticket.ticket_type_id)))
@@ -159,6 +157,18 @@ async def test_worker_refunds_business_database_instead_of_queue_database(
     assert (
         await queue.get(RedisKeys.ticket_type_inventory(ticket.ticket_type_id)) is None
     )
+
+
+async def test_early_worker_task_preserves_unexpired_reservation(
+    session: AsyncSession, ticket: Ticket, redis_clients: tuple[FakeRedis, FakeRedis]
+) -> None:
+    business, queue = redis_clients
+    await release_unpaid_ticket(worker_context(session, business, queue), ticket.id)
+    await session.refresh(ticket)
+    assert ticket.status == TicketStatus.RESERVED
+    ticket_type = await session.get(TicketType, ticket.ticket_type_id)
+    assert ticket_type is not None and ticket_type.tickets_sold == 1
+    assert int(await business.get(RedisKeys.ticket_type_inventory(ticket_type.id))) == 4
 
 
 @pytest.mark.parametrize("task", ["single", "batch"])
@@ -174,19 +184,22 @@ async def test_worker_does_not_refund_before_database_commit(
     # 两处使用同一客户端，只验证事务提交顺序，避免数据库选择影响测试结果。
     ctx = worker_context(session, business, business)
     ticket_id, ticket_type_id = ticket.id, ticket.ticket_type_id
-    with patch.object(session, "commit", side_effect=SQLAlchemyError("commit failed")):
-        with pytest.raises(SQLAlchemyError):
-            if task == "single":
+    with patch.object(
+        AsyncSession, "commit", side_effect=SQLAlchemyError("commit failed")
+    ):
+        if task == "single":
+            with pytest.raises(SQLAlchemyError):
                 await release_unpaid_ticket(ctx, ticket_id)
-            else:
-                await reconcile_hung_tickets(ctx)
+        else:
+            # 批次记录单张失败后继续；不将未提交的取消投影到 Redis。
+            await reconcile_hung_tickets(ctx)
     await session.rollback()
     saved = await session.get(Ticket, ticket_id)
     assert saved is not None and saved.status == TicketStatus.RESERVED
     assert int(await business.get(RedisKeys.ticket_type_inventory(ticket_type_id))) == 4
 
 
-async def test_worker_retries_refund_for_already_canceled_ticket(
+async def test_worker_retries_projection_for_already_canceled_ticket(
     session: AsyncSession, ticket: Ticket, redis_clients: tuple[FakeRedis, FakeRedis]
 ) -> None:
     business, queue = redis_clients
@@ -207,13 +220,15 @@ async def test_worker_opens_and_closes_separate_business_redis(
 ) -> None:
     business, queue = redis_clients
     ctx = {"redis": queue}
-    with patch("src.worker.Redis.from_url", return_value=business):
+    cache = AsyncMock()
+    with patch("src.worker.Redis.from_url", side_effect=[business, cache]):
         await startup(ctx)
     assert ctx["business_redis"] is business
     assert ctx["redis"] is queue
     with patch.object(business, "aclose", new_callable=AsyncMock) as close:
         await shutdown(ctx)
     close.assert_awaited_once()
+    cache.aclose.assert_awaited_once()
 
 
 async def test_failed_reservation_and_orphan_sweep_do_not_refund_twice(
@@ -225,25 +240,27 @@ async def test_failed_reservation_and_orphan_sweep_do_not_refund_twice(
     with patch.object(session, "commit", side_effect=SQLAlchemyError("commit failed")):
         with pytest.raises(SQLAlchemyError):
             await service.create(owner_id, TicketCreate(ticket_type_id=ticket_type_id))
-    with patch("src.worker.time.time", return_value=10**10):
-        await reconcile_redis_orphans(worker_context(session, business, business))
+    await reconcile_redis_orphans(worker_context(session, business, business))
     assert int(await business.get(RedisKeys.ticket_type_inventory(ticket_type_id))) == 4
 
 
-async def test_post_commit_refresh_failure_keeps_reserved_inventory(
+async def test_reservation_response_needs_no_post_commit_refresh(
     session: AsyncSession, ticket: Ticket, redis_clients: tuple[FakeRedis, FakeRedis]
 ) -> None:
     business, queue = redis_clients
     owner_id, ticket_type_id = ticket.owner_id, ticket.ticket_type_id
     with patch.object(
         session, "refresh", side_effect=SQLAlchemyError("refresh failed")
-    ):
-        with pytest.raises(SQLAlchemyError):
-            await TicketService(session, queue, business).create(
-                owner_id, TicketCreate(ticket_type_id=ticket_type_id)
-            )
+    ) as refresh:
+        response = await TicketService(session, queue, business).create(
+            owner_id, TicketCreate(ticket_type_id=ticket_type_id)
+        )
+    refresh.assert_not_awaited()
+    assert response.status == TicketStatus.RESERVED
     assert int(await business.get(RedisKeys.ticket_type_inventory(ticket_type_id))) == 3
     saved_type = await session.get(TicketType, ticket_type_id)
+    assert saved_type is not None
+    await session.refresh(saved_type)
     assert saved_type is not None and saved_type.tickets_sold == 2
 
 

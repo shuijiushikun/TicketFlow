@@ -38,7 +38,8 @@ IdempotencyHeader = Annotated[
         max_length=100,
         description=(
             "可选的请求幂等键。同一次操作重试时沿用原值，新操作使用新值。"
-            "相同用户、操作和键在 Redis 记录有效期内复用结果；记录过期后不再去重。"
+            "相同用户、操作和键复用数据库持久化的原始响应；内容不同返回 409。"
+            "未提供时不保证请求重试去重；响应快照不代表票据的最新状态。"
         ),
     ),
 ]
@@ -148,10 +149,11 @@ async def get_ticket_type_service(
 
 
 async def get_idempotency_service(
+    session: DBDep,
     redis: RedisClient = Depends(get_redis),
 ) -> IdempotencyService:
-    """为接口准备幂等服务，使用 Redis 保存临时处理状态和响应。"""
-    return IdempotencyService(redis)
+    """复用业务数据库会话；Redis 只承担快速互斥。"""
+    return IdempotencyService(redis, session)
 
 
 async def get_payment_service(

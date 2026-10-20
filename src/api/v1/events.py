@@ -46,7 +46,7 @@ async def create_event(
     """创建活动。
 
     仅管理员可操作。提交活动标题、带时区的时间和地址信息，成功时返回活动及其 ID。
-    可通过 Idempotency-Key 在记录有效期内处理重复提交。
+    可通过 Idempotency-Key 复用已持久化的原始响应，避免同一次操作重复创建。
     """
     return await event_service.create(event_data=event)
 

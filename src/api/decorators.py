@@ -2,9 +2,9 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar, cast
 
-from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
+from src.core.exception import IdempotencyStateError
 from src.models import User
 from src.services.idempotency import IdempotencyService
 
@@ -36,11 +36,11 @@ def _extract_business_payload(
 def idempotent(
     action: str, key_param_name: str = "idempotency_key"
 ) -> Callable[[F], F]:
-    """通过 Redis 临时锁和请求内容摘要，处理短时间内的重复请求。
+    """在同一数据库事务中保存业务结果，并复用同一次请求的原响应。
 
     action 区分业务操作，key_param_name 指定接口中的幂等键参数名。
-    相同用户、操作和幂等键在记录有效期内复用已完成的响应；内容不同或仍在处理中时拒绝请求。
-    没有提供幂等键时直接执行业务。记录过期后不再提供去重，不能替代持久化业务约束。
+    相同用户、操作和幂等键永久复用已提交响应；内容不同或仍在处理中时拒绝请求。
+    没有提供幂等键时直接执行业务。
     """
 
     def decorator(func: F) -> F:
@@ -53,39 +53,35 @@ def idempotent(
                 (v for v in kwargs.values() if isinstance(v, IdempotencyService)), None
             )
 
-            if not idempotency_key or not user or not service:
+            if not idempotency_key:
                 return await func(*args, **kwargs)
+            if user is None or service is None:
+                raise IdempotencyStateError("幂等接口缺少用户或数据库事务服务")
 
             payload = _extract_business_payload(kwargs, key_param_name)
 
-            cached_response = await service.check_and_lock(
-                user_id=user.id,
-                action=action,
-                idempotency_key=idempotency_key,
-                payload=payload,
-            )
-
-            if cached_response is not None:
-                return cached_response
-
             try:
-                response = await func(*args, **kwargs)
-                response_data = jsonable_encoder(response)
-
-                await service.save_response(
+                cached_response = await service.check_and_lock(
                     user_id=user.id,
                     action=action,
                     idempotency_key=idempotency_key,
-                    response_data=response_data,
                     payload=payload,
                 )
-
+                if cached_response is not None:
+                    return cached_response
+                response = await func(*args, **kwargs)
+                if not service.committed:
+                    raise IdempotencyStateError("幂等业务尚未提交响应快照")
                 return response
-            except Exception:
-                await service.unlock(
-                    user_id=user.id, action=action, idempotency_key=idempotency_key
-                )
+            except BaseException:
+                # 包含取消；提交后的 rollback 不会撤销已提交业务或删除持久化记录。
+                await service.session.rollback()
                 raise
+            finally:
+                try:
+                    await service.release()
+                finally:
+                    service.clear_context()
 
         return cast(F, wrapper)
 
