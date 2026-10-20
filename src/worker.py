@@ -5,14 +5,18 @@ from typing import Any
 
 from arq import cron
 from arq.connections import RedisSettings
+from prometheus_client import start_http_server
 from redis.asyncio import Redis
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.core import logger, settings
+from src.core.cache_policy import CacheCircuitBreaker, DatabaseAdmission
+from src.core.metrics import registry
 from src.core.redis_keys import RedisKeys
 from src.models import Ticket, TicketType
 from src.models.ticket import TicketStatus
+from src.services.cache_warmup import warm_hot_events
 
 
 async def startup(ctx: dict[str, Any]) -> None:
@@ -32,6 +36,27 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     # ARQ 的 ctx["redis"] 连接 1 号队列库；库存和预订记录使用 0 号业务库。
     ctx["business_redis"] = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    ctx["cache_redis"] = Redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        max_connections=10,
+        socket_connect_timeout=settings.CACHE_REDIS_TIMEOUT_SECONDS,
+        socket_timeout=settings.CACHE_REDIS_TIMEOUT_SECONDS,
+        retry_on_timeout=False,
+    )
+    ctx["cache_circuit"] = CacheCircuitBreaker(settings.CACHE_CIRCUIT_COOLDOWN_SECONDS)
+    # 每个预热进程最多一个数据库查询，无排队；多进程部署需合并预算。
+    ctx["warmup_admission"] = DatabaseAdmission(
+        1,
+        0,
+        settings.CACHE_DB_QUEUE_TIMEOUT_SECONDS,
+        settings.CACHE_DB_QUERY_TIMEOUT_SECONDS,
+        budget="warmup",
+    )
+    if settings.WORKER_METRICS_ENABLED:
+        ctx["metrics_server"] = start_http_server(
+            settings.WORKER_METRICS_PORT, addr="0.0.0.0", registry=registry
+        )
 
     logger.info("后台任务进程已启动")
 
@@ -43,7 +68,16 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     try:
         await ctx["business_redis"].aclose()
     finally:
-        await ctx["engine"].dispose()
+        try:
+            if "cache_redis" in ctx:
+                await ctx["cache_redis"].aclose()
+        finally:
+            await ctx["engine"].dispose()
+            if "metrics_server" in ctx:
+                server, thread = ctx["metrics_server"]
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
 
     logger.info("后台任务进程已关闭")
 
@@ -210,11 +244,12 @@ class WorkerSettings:
         host=settings.REDIS_HOST, port=settings.REDIS_PORT, database=1
     )
 
-    functions = [release_unpaid_ticket]
+    functions = [release_unpaid_ticket, warm_hot_events]
     on_startup = startup
     on_shutdown = shutdown
 
     cron_jobs = [
+        cron(warm_hot_events, second=10, unique=True, timeout=25),
         cron(reconcile_hung_tickets, minute=set(range(0, 60, 5))),
         cron(reconcile_redis_orphans, minute=set(range(2, 60, 5))),
     ]

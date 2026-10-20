@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp
 
-from src.api import health
-from src.api.v1 import auth, events, payment, ticket_type, tickets
+from src.api import health, observability
+from src.api.v1 import analytics, auth, events, payment, ticket_type, tickets
 from src.core import logger
 from src.core.cache_policy import CacheUnavailableError, QueryRateLimitError
 from src.core.config import settings
@@ -28,6 +29,7 @@ from src.core.exception import (
     TicketTypeQuantity,
     UserAlreadyExistsError,
 )
+from src.core.request_context import RequestContextMiddleware
 from src.db.redis import close_redis_pool, init_redis_pool
 
 
@@ -46,7 +48,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await close_redis_pool()
 
 
-app = FastAPI(
+class ObservedFastAPI(FastAPI):
+    """将请求上下文放在错误响应外层，让未处理异常也带追踪 ID。"""
+
+    def build_middleware_stack(self) -> ASGIApp:
+        """保留 FastAPI 原异常处理顺序，再包装原生 ASGI 观测层。"""
+        return RequestContextMiddleware(super().build_middleware_stack())
+
+
+app = ObservedFastAPI(
     title=f"{settings.PROJECT_NAME} 活动票务预约后端",
     version=settings.PROJECT_VERSION,
     description=(
@@ -80,7 +90,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(observability.router)
 app.include_router(health.router, tags=["系统检查"])
+app.include_router(
+    analytics.router, prefix=f"{settings.API_V1_STR}/analytics", tags=["热点分析"]
+)
 
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["用户认证"])
 app.include_router(

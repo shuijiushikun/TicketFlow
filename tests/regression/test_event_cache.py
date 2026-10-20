@@ -245,6 +245,7 @@ async def test_query_http_errors_and_validation(
     service.get = AsyncMock(side_effect=CacheUnavailableError("暂时繁忙"))
     original = app.dependency_overrides.copy()
     app.dependency_overrides[deps.get_event_service] = lambda: service
+    app.dependency_overrides[deps.get_hotspot_tracker] = lambda: MagicMock()
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"

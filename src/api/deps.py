@@ -21,6 +21,7 @@ from src.schemas.token import TokenPayload
 from src.services.auth import AuthService
 from src.services.event import EventService
 from src.services.health import HealthService
+from src.services.hotspot import HotspotTracker
 from src.services.idempotency import IdempotencyService
 from src.services.payment import PaymentService
 from src.services.ticket import TicketService
@@ -123,6 +124,13 @@ async def limit_event_queries(request: Request) -> None:
     """限制公开活动查询；使用连接地址，不自行信任客户端转发头。"""
     client = request.client.host if request.client else "unknown"
     event_query_limiter.check(client)
+
+
+async def get_hotspot_tracker(
+    redis: RedisClient = Depends(get_cache_redis),
+) -> HotspotTracker:
+    """访问统计复用有限查询连接池，使用独立故障冷却保护查询链路。"""
+    return HotspotTracker(redis)
 
 
 async def get_auth_service(session: DBDep) -> AuthService:

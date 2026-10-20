@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: TicketCore
+    orgId: 1
+    folder: TicketCore
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

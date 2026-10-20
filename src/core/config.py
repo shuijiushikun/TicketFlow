@@ -55,6 +55,22 @@ class Settings(BaseSettings):
     EVENT_QUERY_GLOBAL_BURST: int = Field(default=2000, ge=1)
     EVENT_QUERY_MAX_CLIENTS: int = Field(default=10000, ge=1)
 
+    # 分钟访问桶有限保留；热点只用于查询预热，不推断真实购票需求。
+    HOTSPOT_BUCKET_TTL_SECONDS: int = Field(default=900, ge=360)
+    HOTSPOT_MAX_EVENTS_PER_MINUTE: int = Field(default=5000, ge=1, le=100000)
+    HOTSPOT_CANDIDATES_PER_BUCKET: int = Field(default=100, ge=1, le=1000)
+    HOTSPOT_TOP_K: int = Field(default=20, ge=1, le=100)
+    HOTSPOT_MIN_VIEWS: int = Field(default=20, ge=1)
+    HOTSPOT_GROWTH_MIN_VIEWS: int = Field(default=10, ge=1)
+    HOTSPOT_GROWTH_RATIO: float = Field(default=2.0, ge=1)
+    HOTSPOT_RECORD_TIMEOUT_SECONDS: float = Field(default=0.02, gt=0, le=0.1)
+    CACHE_WARMUP_ENABLED: bool = True
+    CACHE_WARMUP_MAX_EVENTS: int = Field(default=20, ge=1, le=100)
+    CACHE_WARMUP_REFRESH_SECONDS: int = Field(default=300, ge=0)
+    CACHE_WARMUP_TIMEOUT_SECONDS: float = Field(default=15, gt=0, le=20)
+    WORKER_METRICS_ENABLED: bool = False
+    WORKER_METRICS_PORT: int = Field(default=8001, ge=1, le=65535)
+
     @property
     def DATABASE_URL(self) -> str:
         """组合 PostgreSQL 异步连接地址，供 SQLAlchemy 和 asyncpg 使用。"""

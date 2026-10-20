@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy>=2.0.45",
     "uvicorn>=0.40.0",
     "PyJWT>=2.8.0",
+    "prometheus-client>=0.21,<1",
 ]
 
 [build-system]

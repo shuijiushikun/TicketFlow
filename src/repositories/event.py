@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from asyncpg import InterfaceError, PostgresError
 from pydantic import TypeAdapter
@@ -23,6 +23,7 @@ from src.core.cache_runtime import cache_admission, cache_circuit
 from src.core.cache_store import CacheOfflineError, EventCacheStore
 from src.core.config import settings
 from src.core.exception import EventDeleteError, EventNotFoundError
+from src.core.metrics import CACHE_EVENTS
 from src.core.redis_keys import RedisClient, RedisKeys
 from src.models import Event
 from src.schemas import EventCreate, EventDetailResponse, EventResponse
@@ -100,7 +101,13 @@ class CachedEventRepository:
         self.store = EventCacheStore(redis, circuit)
         self.admission = admission
 
-    async def get(self, event_id: int) -> EventDetailResponse:
+    async def get(
+        self,
+        event_id: int,
+        *,
+        source: Literal["request", "warmup"] = "request",
+        refresh_before_seconds: int = 0,
+    ) -> EventDetailResponse:
         """查询详情；仅数据库确认不存在时写短期空值缓存。"""
 
         async def load() -> str:
@@ -115,12 +122,22 @@ class CachedEventRepository:
             load,
             settings.CACHE_DETAIL_TTL_SECONDS,
             settings.CACHE_DETAIL_JITTER_SECONDS,
+            kind="detail",
+            source=source,
+            refresh_before_seconds=refresh_before_seconds,
         )
         if body == self.NOT_FOUND:
             raise EventNotFoundError("活动不存在")
         return EventDetailResponse.model_validate_json(body)
 
-    async def get_all(self, offset: int, limit: int) -> Sequence[EventResponse]:
+    async def get_all(
+        self,
+        offset: int,
+        limit: int,
+        *,
+        source: Literal["request", "warmup"] = "request",
+        refresh_before_seconds: int = 0,
+    ) -> Sequence[EventResponse]:
         """查询指定分页；所有分页共享失效版本，各分页单独互斥重建。"""
         adapter = TypeAdapter(list[EventResponse])
 
@@ -136,6 +153,9 @@ class CachedEventRepository:
             load,
             settings.CACHE_LIST_TTL_SECONDS,
             settings.CACHE_LIST_JITTER_SECONDS,
+            kind="list",
+            source=source,
+            refresh_before_seconds=refresh_before_seconds,
         )
         return adapter.validate_json(body)
 
@@ -154,15 +174,25 @@ class CachedEventRepository:
         load: Callable[[], Awaitable[str]],
         base_ttl: int,
         jitter: int,
+        *,
+        kind: Literal["detail", "list"],
+        source: Literal["request", "warmup"],
+        refresh_before_seconds: int,
     ) -> str:
         lock = CacheLock(
             self.redis, RedisKeys.cache_lock(cache_key), settings.CACHE_LOCK_LEASE_MS
         )
         acquired = False
         try:
-            generation, body = await self.store.read(generation_key, cache_key)
+            generation, body = await self.store.read(
+                generation_key, cache_key, refresh_before_seconds=refresh_before_seconds
+            )
             if body is not None:
+                CACHE_EVENTS.labels(
+                    kind, source, "negative_hit" if body == self.NOT_FOUND else "hit"
+                ).inc()
                 return body
+            CACHE_EVENTS.labels(kind, source, "miss").inc()
             deadline = (
                 asyncio.get_running_loop().time() + settings.CACHE_LOCK_WAIT_SECONDS
             )
@@ -171,19 +201,28 @@ class CachedEventRepository:
                 try:
                     async with asyncio.timeout_at(deadline):
                         acquired = await self.store.call(lock.acquire)
+                        CACHE_EVENTS.labels(
+                            kind,
+                            source,
+                            "lock_acquired" if acquired else "lock_contended",
+                        ).inc()
                         if not acquired:
                             await asyncio.sleep(random.uniform(0.015, 0.035))
                         # 获得锁后再次读取，包括版本，防止等待期间发生写入。
                         generation, body = await self.store.read(
-                            generation_key, cache_key
+                            generation_key,
+                            cache_key,
+                            refresh_before_seconds=refresh_before_seconds,
                         )
                 except TimeoutError as exc:
+                    CACHE_EVENTS.labels(kind, source, "lock_timeout").inc()
                     raise CacheUnavailableError("活动缓存正在重建，请稍后重试") from exc
                 if body is not None:
                     return body
                 if acquired:
                     break
 
+            CACHE_EVENTS.labels(kind, source, "rebuild").inc()
             body = await self._load(load)
             ttl = base_ttl + random.randint(0, jitter)
             if body == self.NOT_FOUND:
@@ -191,7 +230,7 @@ class CachedEventRepository:
                     0, settings.CACHE_NEGATIVE_JITTER_SECONDS
                 )
             try:
-                await self.store.fill(
+                filled = await self.store.fill(
                     generation_key,
                     cache_key,
                     generation,
@@ -200,11 +239,18 @@ class CachedEventRepository:
                     body,
                     ttl,
                 )
+                CACHE_EVENTS.labels(
+                    kind, source, "fill" if filled else "fill_rejected"
+                ).inc()
             except CacheOfflineError:
                 # 已获得数据库结果，回填失败不重复查询，也不丢失成功响应。
                 pass
             return body
         except CacheOfflineError:
+            if source == "warmup":
+                CACHE_EVENTS.labels(kind, source, "warmup_paused").inc()
+                raise CacheUnavailableError("缓存暂不可用，暂停预热") from None
+            CACHE_EVENTS.labels(kind, source, "fallback").inc()
             return await self._load(load)
         finally:
             if acquired:

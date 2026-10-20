@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from redis.exceptions import RedisError
 from src.core import logger
 from src.core.cache_policy import CacheCircuitBreaker, CacheUnavailableError
 from src.core.config import settings
+from src.core.metrics import CACHE_REDIS_DURATION, CACHE_REDIS_OPERATIONS
 from src.core.redis_keys import RedisClient, RedisKeys
 
 T = TypeVar("T")
@@ -32,7 +34,8 @@ class EventCacheStore:
             generation = ARGV[1]
             redis.call('SET', KEYS[1], generation, 'EX', ARGV[2])
         end
-        if redis.call('HGET', KEYS[2], 'generation') == generation then
+        if redis.call('HGET', KEYS[2], 'generation') == generation
+            and redis.call('TTL', KEYS[2]) > tonumber(ARGV[3]) then
             return {generation, redis.call('HGET', KEYS[2], 'body')}
         end
         return {generation, false}
@@ -66,14 +69,20 @@ class EventCacheStore:
     ) -> T:
         """限制单次缓存命令时间；写后失效必须尝试，不能被读熔断跳过。"""
         if not force and not self.circuit.available():
+            CACHE_REDIS_OPERATIONS.labels("skipped").inc()
             raise CacheOfflineError
+        started = perf_counter()
         try:
             async with asyncio.timeout(settings.CACHE_REDIS_TIMEOUT_SECONDS):
                 result = await operation()
         except (RedisError, TimeoutError) as exc:
             self.circuit.fail()
+            CACHE_REDIS_OPERATIONS.labels("error").inc()
             logger.warning("活动查询缓存暂不可用，启用有界回源")
             raise CacheOfflineError from exc
+        finally:
+            CACHE_REDIS_DURATION.observe(perf_counter() - started)
+        CACHE_REDIS_OPERATIONS.labels("success").inc()
         self.circuit.success()
         return result
 
@@ -83,8 +92,10 @@ class EventCacheStore:
             self.redis.eval(script, len(keys), *keys, *args),  # type: ignore[no-untyped-call]
         )
 
-    async def read(self, generation_key: str, cache_key: str) -> tuple[str, str | None]:
-        """原子初始化随机版本并读取当前版本正文；空版本只短暂保留。"""
+    async def read(
+        self, generation_key: str, cache_key: str, *, refresh_before_seconds: int = 0
+    ) -> tuple[str, str | None]:
+        """原子读取当前版本；预热可把即将过期的正文视为需刷新，但不删除旧值。"""
         bootstrap_ttl = (
             settings.CACHE_NEGATIVE_TTL_SECONDS
             + settings.CACHE_NEGATIVE_JITTER_SECONDS
@@ -96,6 +107,7 @@ class EventCacheStore:
                 [generation_key, cache_key],
                 uuid4().hex,
                 bootstrap_ttl,
+                refresh_before_seconds,
             )
         )
         generation, body = result

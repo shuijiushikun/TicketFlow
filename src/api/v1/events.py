@@ -11,6 +11,7 @@ from src.api.deps import (
     IdempotencyServiceDep,
     TicketTypeServiceDep,
     get_current_superuser,
+    get_hotspot_tracker,
     limit_event_queries,
 )
 from src.core.config import settings
@@ -23,6 +24,7 @@ from src.schemas.event import (
     EventUpdate,
 )
 from src.schemas.ticket_type import TicketTypeResponse
+from src.services.hotspot import HotspotTracker
 
 router = APIRouter()
 
@@ -58,13 +60,17 @@ async def create_event(
     responses={429: {"description": "查询过于频繁"}, 503: {"description": "暂时繁忙"}},
 )
 async def get_event(
-    event_id: Annotated[int, Path(ge=1)], event_service: EventServiceDep
+    event_id: Annotated[int, Path(ge=1)],
+    event_service: EventServiceDep,
+    tracker: Annotated[HotspotTracker, Depends(get_hotspot_tracker)],
 ) -> EventDetailResponse:
     """查询活动详情。
 
     通过 event_id 查询活动基本信息及其票种列表，无需登录。
     """
-    return await event_service.get(event_id=event_id)
+    response = await event_service.get(event_id=event_id)
+    await tracker.record(event_id)
+    return response
 
 
 @router.get(

@@ -12,6 +12,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from time import monotonic
+from typing import Literal
+
+from src.core.metrics import (
+    DB_ACTIVE,
+    DB_ADMISSION,
+    DB_QUERY_SECONDS,
+    DB_QUEUED,
+    DB_WAIT_SECONDS,
+)
 
 
 class CacheUnavailableError(Exception):
@@ -39,18 +48,27 @@ class DatabaseAdmission:
         queue_size: int,
         queue_timeout: float,
         query_timeout: float,
+        *,
+        budget: Literal["query", "warmup"] = "query",
     ) -> None:
         self._concurrency = concurrency
         self._queue_size = queue_size
         self._queue_timeout = queue_timeout
         self._query_timeout = query_timeout
+        self._budget = budget
         self._active = 0
         self._waiters: deque[asyncio.Future[None]] = deque()
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
         """获取回源名额，执行超时或取消时归还；普通数据库异常原样抛出。"""
-        await self._acquire()
+        waiting_since = monotonic()
+        try:
+            await self._acquire()
+        finally:
+            DB_WAIT_SECONDS.labels(self._budget).observe(monotonic() - waiting_since)
+        started = monotonic()
+        result = "success"
         try:
             deadline = asyncio.timeout(self._query_timeout)
             try:
@@ -59,29 +77,48 @@ class DatabaseAdmission:
             except TimeoutError as exc:
                 if not deadline.expired():
                     raise
+                result = "timeout"
                 raise CacheUnavailableError("数据库查询超时，请稍后重试") from exc
+        except asyncio.CancelledError:
+            result = "cancelled"
+            raise
+        except Exception:
+            if result != "timeout":
+                result = "error"
+            raise
         finally:
+            DB_QUERY_SECONDS.labels(self._budget, result).observe(monotonic() - started)
             self._release()
 
     async def _acquire(self) -> None:
         if self._active < self._concurrency:
             self._active += 1
+            DB_ACTIVE.labels(self._budget).inc()
+            DB_ADMISSION.labels(self._budget, "accepted").inc()
             return
         if len(self._waiters) >= self._queue_size:
+            DB_ADMISSION.labels(self._budget, "rejected").inc()
             raise CacheUnavailableError("数据库查询繁忙，请稍后重试")
 
         waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._waiters.append(waiter)
+        DB_QUEUED.labels(self._budget).inc()
         acquired = False
         try:
             async with asyncio.timeout(self._queue_timeout):
                 await waiter
             acquired = True
+            DB_ADMISSION.labels(self._budget, "accepted").inc()
         except TimeoutError as exc:
+            DB_ADMISSION.labels(self._budget, "queue_timeout").inc()
             raise CacheUnavailableError("等待数据库查询超时，请稍后重试") from exc
+        except asyncio.CancelledError:
+            DB_ADMISSION.labels(self._budget, "cancelled").inc()
+            raise
         finally:
             with suppress(ValueError):
                 self._waiters.remove(waiter)
+                DB_QUEUED.labels(self._budget).dec()
             # 名额已移交但任务尚未恢复时也可能被取消，此时必须继续转交名额。
             if not acquired and waiter.done() and not waiter.cancelled():
                 self._release()
@@ -89,10 +126,12 @@ class DatabaseAdmission:
     def _release(self) -> None:
         while self._waiters:
             waiter = self._waiters.popleft()
+            DB_QUEUED.labels(self._budget).dec()
             if not waiter.done():
                 waiter.set_result(None)
                 return
         self._active -= 1
+        DB_ACTIVE.labels(self._budget).dec()
 
 
 @dataclass(slots=True)

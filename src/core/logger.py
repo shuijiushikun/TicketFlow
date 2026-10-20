@@ -4,6 +4,7 @@ import sys
 from datetime import UTC, datetime
 
 from src.core.config import settings
+from src.core.request_context import request_id_context
 
 
 class JsonFormatter(logging.Formatter):
@@ -28,6 +29,8 @@ class JsonFormatter(logging.Formatter):
 
         if hasattr(record, "extra_data"):
             log_entry.update(record.extra_data)
+
+        log_entry["request_id"] = request_id_context.get()
 
         return json.dumps(log_entry)
 
