@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core import settings
 from src.core.redis_keys import RedisKeys
+from src.db.redis import get_redis
 from src.models import Ticket, TicketType, User
 from src.models.ticket import TicketStatus
 from src.worker import (
@@ -156,6 +157,61 @@ class TestGarbageCollector:
 
 @pytest.mark.asyncio
 class TestReleaseUnpaidTicketWorker:
+    @pytest.mark.parametrize("ticket_state", ["unexpired", "expired", "paid"])
+    async def test_repeated_release_with_real_redis(
+        self,
+        user_in_db: User,
+        db_connection: AsyncSession,
+        ticket_type_in_db: TicketType,
+        monkeypatch: pytest.MonkeyPatch,
+        ticket_state: str,
+    ) -> None:
+        """真实 Redis 下，提前或重复回收不会错误释放库存。"""
+        monkeypatch.setattr(settings, "TICKET_RESERVATION_TIME_SECONDS", 900)
+        ticket_type_in_db.tickets_quantity = 5
+        ticket_type_in_db.tickets_sold = 1
+        ticket_type_in_db.inventory_version = 1
+        ticket = TicketFactory.build(
+            ticket_type=ticket_type_in_db,
+            owner=user_in_db,
+            status=TicketStatus.SOLD
+            if ticket_state == "paid"
+            else TicketStatus.RESERVED,
+            created_at=datetime.now(UTC)
+            - (timedelta(days=1) if ticket_state == "expired" else timedelta()),
+        )
+        db_connection.add(ticket)
+        await db_connection.commit()
+        ticket_id, type_id = ticket.id, ticket_type_in_db.id
+        expired = ticket_state == "expired"
+        expected_status = TicketStatus.CANCELED if expired else ticket.status
+        expected_sold, expected_version = (0, 2) if expired else (1, 1)
+        session_maker = async_sessionmaker(db_connection.bind, expire_on_commit=False)
+
+        async with await get_redis() as redis:
+            inventory_key = RedisKeys.ticket_type_inventory(type_id)
+            version_key = RedisKeys.inventory_version(type_id)
+            legacy_key = RedisKeys.active_reservations_hash()
+            await redis.set(inventory_key, "4")
+            await redis.set(version_key, str(1).zfill(20))
+            await redis.hset(legacy_key, str(ticket_id), f"{type_id}:1")
+            ctx = {"session_maker": session_maker, "business_redis": redis}
+
+            for _ in range(2):
+                await release_unpaid_ticket(ctx, ticket_id)
+                async with session_maker() as session:
+                    saved_ticket = await session.get(Ticket, ticket_id)
+                    saved_type = await session.get(TicketType, type_id)
+                    assert saved_ticket is not None and saved_type is not None
+                    assert saved_ticket.status == expected_status
+                    assert saved_type.tickets_sold == expected_sold
+                    assert saved_type.inventory_version == expected_version
+                assert await redis.get(inventory_key) == str(5 - expected_sold)
+                assert await redis.get(version_key) == str(expected_version).zfill(20)
+                assert bool(await redis.hexists(legacy_key, str(ticket_id))) == (
+                    ticket_state == "unexpired"
+                )
+
     async def test_release_unpaid_ticket_success(
         self,
         user_in_db: User,

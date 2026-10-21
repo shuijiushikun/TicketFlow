@@ -59,7 +59,7 @@ async def test_seed_fills_dedicated_users_and_preserves_existing_sales(
             event_id, ticket_type_id, ticket_id = event.id, ticket_type.id, ticket.id
 
         targets = await seed_db(engine, users_count=3)
-        repeated = await seed_db(engine, users_count=3)
+        repeated = await seed_db(engine, users_count=3, tickets_per_type=100_000)
 
         assert targets == repeated
         assert targets.event_id == event_id
@@ -92,9 +92,16 @@ async def test_seed_fills_dedicated_users_and_preserves_existing_sales(
 async def test_seed_can_explicitly_create_schema(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'new.db'}")
     try:
-        targets = await seed_db(engine, users_count=2, create_schema=True)
+        targets = await seed_db(
+            engine, users_count=2, create_schema=True, tickets_per_type=100_000
+        )
         assert len(targets.user_ids) == 2
         assert len(targets.ticket_type_ids) == 2
+        async with AsyncSession(engine) as session:
+            quantities = list(
+                await session.scalars(select(TicketType.tickets_quantity))
+            )
+            assert quantities == [100_000, 100_000]
     finally:
         await engine.dispose()
 
@@ -247,7 +254,13 @@ def test_locust_sends_one_ticket_and_a_new_idempotency_key(
     requests: list[dict[str, Any]] = []
 
     class Response:
-        status_code = 201
+        def __init__(self, code: int, payload: dict[str, Any]) -> None:
+            self.status_code = code
+            self.payload = payload
+            self.request_meta: dict[str, str] = {}
+
+        def json(self) -> dict[str, Any]:
+            return self.payload
 
         def __enter__(self) -> "Response":
             return self
@@ -258,13 +271,17 @@ def test_locust_sends_one_ticket_and_a_new_idempotency_key(
         def success(self) -> None:
             pass
 
+        def failure(self, message: str) -> None:
+            pytest.fail(message)
+
     class Client:
         def post(self, url: str, **kwargs: Any) -> Response:
             requests.append({"url": url, **kwargs})
-            return Response()
+            return Response(201, {"id": 1, "ticket_type_id": 21, "status": "RESERVED"})
 
-        def get(self, url: str, **kwargs: Any) -> None:
+        def get(self, url: str, **kwargs: Any) -> Response:
             requests.append({"url": url, **kwargs})
+            return Response(200, {"id": 9})
 
     # CLI 的 runner 会把环境中的 host 写入用户类；这里直接构造用户时补上该步骤。
     monkeypatch.setattr(locustfile.RammsteinFan, "host", "http://localhost")
@@ -280,6 +297,7 @@ def test_locust_sends_one_ticket_and_a_new_idempotency_key(
     ]
     keys = [request["headers"]["Idempotency-Key"] for request in requests[:2]]
     assert len(set(keys)) == 2
+    assert all(request["url"] == "/api/v1/tickets" for request in requests[:2])
     assert all(10 <= len(key) <= 100 for key in keys)
     assert requests[2]["url"] == "/api/v1/events/9"
     for request in requests:

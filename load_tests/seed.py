@@ -41,10 +41,15 @@ async def seed_db(
     users_count: int = USERS_COUNT,
     *,
     create_schema: bool = False,
+    tickets_per_type: int | None = None,
 ) -> LoadTestTargets:
     """补齐专用用户并返回真实 ID；SQLite 仅用于本地回归测试。"""
     if type(users_count) is not int or users_count <= 0:
         raise ValueError("users_count 必须是正整数")
+    if tickets_per_type is not None and (
+        type(tickets_per_type) is not int or tickets_per_type <= 0
+    ):
+        raise ValueError("tickets_per_type 必须是正整数")
     if engine.url.get_backend_name() != "sqlite":
         validate_database_url(engine.url)
     if create_schema:
@@ -80,7 +85,9 @@ async def seed_db(
                     event_id=event.id,
                     name=name,
                     price=price,
-                    tickets_quantity=quantity,
+                    tickets_quantity=(
+                        quantity if tickets_per_type is None else tickets_per_type
+                    ),
                     tickets_sold=0,
                 )
                 for name, price, quantity in (
@@ -154,6 +161,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--database-url", required=True, help="专用 _loadtest 数据库 URL"
     )
     parser.add_argument("--users-count", type=int, default=USERS_COUNT)
+    parser.add_argument(
+        "--tickets-per-type",
+        type=int,
+        help="新建票种的总票量；不改变已有票种、票据或占用",
+    )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--create-schema", action="store_true", help="显式创建缺失表")
     return parser.parse_args(argv)
@@ -166,7 +178,10 @@ async def main(argv: list[str] | None = None) -> None:
     engine = create_async_engine(url, pool_pre_ping=True)
     try:
         targets = await seed_db(
-            engine, users_count=args.users_count, create_schema=args.create_schema
+            engine,
+            users_count=args.users_count,
+            create_schema=args.create_schema,
+            tickets_per_type=args.tickets_per_type,
         )
         write_targets(targets, args.manifest)
         logger.info("manifest 已写入 %s", args.manifest)

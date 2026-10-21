@@ -247,12 +247,12 @@ async def _cleanup_legacy_reservations(ctx: dict[Any, Any]) -> None:
 
 
 async def process_outbox(ctx: dict[Any, Any]) -> None:
-    """每轮处理最多 100 项到期待办，活动失效、库存投影与标记清理共用入口。"""
+    """每轮最多领取 1000 条，库存按票种合并；共用 5 秒执行预算。"""
     async with ctx["session_maker"]() as session:
         dispatcher = transaction_outbox(
             session, ctx["business_redis"], ctx.get("cache_redis")
         )
-    await dispatcher.dispatch_batch(batch_size=100, time_budget_seconds=5)
+    await dispatcher.dispatch_batch(batch_size=1000, time_budget_seconds=5)
 
 
 class WorkerSettings:

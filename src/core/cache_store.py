@@ -78,7 +78,15 @@ class EventCacheStore:
         except (RedisError, TimeoutError) as exc:
             self.circuit.fail()
             CACHE_REDIS_OPERATIONS.labels("error").inc()
-            logger.warning("活动查询缓存暂不可用，启用有界回源")
+            logger.warning(
+                "活动查询缓存暂不可用，启用有界回源；操作=%s，异常=%s.%s，"
+                "耗时=%.1fms，预算=%.1fms",
+                getattr(operation, "__qualname__", type(operation).__name__),
+                type(exc).__module__,
+                type(exc).__name__,
+                (perf_counter() - started) * 1000,
+                settings.CACHE_REDIS_TIMEOUT_SECONDS * 1000,
+            )
             raise CacheOfflineError from exc
         finally:
             CACHE_REDIS_DURATION.observe(perf_counter() - started)

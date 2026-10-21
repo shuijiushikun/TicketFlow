@@ -19,7 +19,11 @@ from src.models import Ticket, TicketType
 from src.models.ticket import TicketStatus
 from src.schemas import TicketCreate, TicketResponse
 from src.schemas.ticket import TicketDetailResponse
-from src.services.inventory import INVENTORY_SYNC, transaction_outbox
+from src.services.inventory import (
+    INVENTORY_SYNC,
+    sync_reserved_inventory,
+    transaction_outbox,
+)
 from src.services.outbox import enqueue_outbox
 from src.services.reservations import cancel_reservation
 from src.services.transactions import commit_business
@@ -39,18 +43,25 @@ class TicketService:
     async def create(self, user_id: int, ticket_data: TicketCreate) -> TicketResponse:
         """原子判断剩余量并扣一张票；回滚时无需跨系统加回库存。"""
         try:
-            reserved_type = await self.db.scalar(
-                update(TicketType)
-                .where(
-                    TicketType.id == ticket_data.ticket_type_id,
-                    TicketType.tickets_sold < TicketType.tickets_quantity,
+            reserved_type = (
+                await self.db.execute(
+                    update(TicketType)
+                    .where(
+                        TicketType.id == ticket_data.ticket_type_id,
+                        TicketType.tickets_sold < TicketType.tickets_quantity,
+                    )
+                    .values(
+                        tickets_sold=TicketType.tickets_sold + 1,
+                        inventory_version=TicketType.inventory_version + 1,
+                    )
+                    .returning(
+                        TicketType.id,
+                        TicketType.tickets_quantity,
+                        TicketType.tickets_sold,
+                        TicketType.inventory_version,
+                    )
                 )
-                .values(
-                    tickets_sold=TicketType.tickets_sold + 1,
-                    inventory_version=TicketType.inventory_version + 1,
-                )
-                .returning(TicketType.id)
-            )
+            ).one_or_none()
             if reserved_type is None:
                 exists = await self.db.scalar(
                     select(TicketType.id).where(
@@ -73,7 +84,14 @@ class TicketService:
             await self.db.rollback()
             raise
 
-        await self.outbox.dispatch_best_effort(pending_id)
+        await sync_reserved_inventory(
+            self.db,
+            self.redis,
+            outbox_id=pending_id,
+            ticket_type_id=reserved_type.id,
+            version=reserved_type.inventory_version,
+            available=reserved_type.tickets_quantity - reserved_type.tickets_sold,
+        )
         try:
             async with asyncio.timeout(settings.TRANSACTION_REDIS_TIMEOUT_SECONDS):
                 await self.arq_pool.enqueue_job(

@@ -1,4 +1,3 @@
-import json
 import random
 from functools import cache
 from typing import Any
@@ -31,6 +30,8 @@ class RammsteinFan(FastHttpUser):
 
     # Locust 的 between 没有类型注解，运行时返回用户等待时间函数。
     wait_time = between(0.1, 0.5)  # type: ignore[no-untyped-call]
+    connection_timeout = 5.0
+    network_timeout = 5.0
 
     def __init__(self, environment: Environment) -> None:
         super().__init__(environment)
@@ -47,49 +48,64 @@ class RammsteinFan(FastHttpUser):
     def browse_event(self) -> None:
         """模拟用户浏览目标活动详情。"""
         self.headers["Authorization"] = self.token_provider.authorization()
-        self.client.get(
+        with self.client.get(
             f"/api/v1/events/{self.config.targets.event_id}",
             headers=self.headers,
             name="/api/v1/events/[id]",
-        )
+            catch_response=True,
+        ) as response:
+            code = response.status_code
+            outcome = f"HTTP {code}" if code else "network_error"
+            response.request_meta["name"] = f"/api/v1/events/[id] [{outcome}]"
+            if code == 200:
+                try:
+                    payload = response.json()
+                except ValueError:
+                    response.failure("活动详情响应不是有效 JSON")
+                    return
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("id") == self.config.targets.event_id
+                ):
+                    response.success()
+                else:
+                    response.failure("活动详情与目标 ID 不一致")
+            elif code:
+                response.failure(f"HTTP {code}")
 
     @task(1)
     def attempt_purchase(self) -> None:
-        """模拟用户尝试预订票据，并区分售罄等预期业务结果与异常。"""
+        """只把有效预订算成功，售罄、限流及异常按响应分别记录。"""
         ticket_type_id = random.choice(self.config.targets.ticket_type_ids)
         payload = {"ticket_type_id": ticket_type_id}
         self.headers["Authorization"] = self.token_provider.authorization()
         headers = {**self.headers, "Idempotency-Key": str(uuid4())}
 
         with self.client.post(
-            "/api/v1/tickets/",
+            "/api/v1/tickets",
             json=payload,
             headers=headers,
-            name="/api/v1/tickets/",
+            name="/api/v1/tickets",
             catch_response=True,
         ) as response:
-            if response.status_code in (200, 201):
-                response.success()
-            elif response.status_code in (400, 404, 409):
+            code = response.status_code
+            outcome = f"HTTP {code}" if code else "network_error"
+            response.request_meta["name"] = f"/api/v1/tickets [{outcome}]"
+            if code == 201:
                 try:
-                    error_detail = response.json().get("detail", "").lower()
-                    if any(
-                        kw in error_detail
-                        for kw in [
-                            "sold out",
-                            "not enough",
-                            "unavailable",
-                            "售罄",
-                            "库存不足",
-                            "暂无可用库存",
-                        ]
-                    ):
-                        response.success()
-                    else:
-                        response.failure(f"非预期业务错误：{error_detail}")
-                except json.JSONDecodeError:
-                    response.failure(f"错误响应不是 JSON：{response.text}")
-            elif response.status_code == 422:
-                response.failure(f"请求参数校验失败：{response.text}")
-            else:
-                response.failure(f"HTTP {response.status_code}: {response.text}")
+                    payload = response.json()
+                except ValueError:
+                    response.failure("HTTP 201 响应不是有效 JSON")
+                    return
+                if (
+                    isinstance(payload, dict)
+                    and type(payload.get("id")) is int
+                    and payload["id"] > 0
+                    and payload.get("ticket_type_id") == ticket_type_id
+                    and payload.get("status") == "RESERVED"
+                ):
+                    response.success()
+                else:
+                    response.failure("HTTP 201 响应的票据、票种或预订状态不正确")
+            elif code:
+                response.failure(f"HTTP {code}: {response.text[:200]}")

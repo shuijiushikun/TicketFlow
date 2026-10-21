@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabasePoolTimeout
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
@@ -146,6 +147,21 @@ async def conflict_exception_handler(request: Request, exc: Exception) -> JSONRe
     """将售罄、账号重复、幂等冲突和非法业务操作统一转换为 409。"""
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(DatabasePoolTimeout)
+async def database_pool_timeout(
+    request: Request, exc: DatabasePoolTimeout
+) -> JSONResponse:
+    """连接池耗尽属于暂时过载，保持有限等待并提示沿用原幂等键重试。"""
+    logger.warning(
+        "数据库连接池等待超时 method=%s path=%s", request.method, request.url.path
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "数据库繁忙，请稍后重试；同次操作请沿用原幂等键"},
+        headers={"Retry-After": "1"},
     )
 
 

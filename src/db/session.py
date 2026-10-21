@@ -17,8 +17,9 @@ connect_args = {
 
 engine: AsyncEngine = create_async_engine(
     str(settings.DATABASE_URL),
-    pool_size=10,
-    max_overflow=10,
+    # 保持单进程最多 20 个连接，并复用峰值连接，避免突发流量反复建连。
+    pool_size=20,
+    max_overflow=0,
     pool_timeout=10.0,
     pool_pre_ping=True,
     echo=settings.ENVIRONMENT == "dev",

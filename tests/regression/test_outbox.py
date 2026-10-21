@@ -122,3 +122,49 @@ async def test_repeated_invalidation_is_safe_after_delivery_interruption(
         assert await redis.get(RedisKeys.event_generation(999)) != generation
         assert not await dispatcher.dispatch(pending.id)
         assert await session.scalar(select(func.count()).select_from(OutboxEvent)) == 0
+
+
+@pytest.mark.parametrize("fail_projection", [False, True])
+async def test_inventory_batch_merges_only_selected_rows_and_preserves_retry(
+    session: AsyncSession, ticket, redis_clients, fail_projection: bool
+) -> None:
+    from src.models.outbox import OutboxEvent
+    from src.services.inventory import INVENTORY_SYNC, transaction_outbox
+    from src.services.outbox import enqueue_outbox
+
+    business, _ = redis_clients
+    ticket_type_id = ticket.ticket_type_id
+    for _ in range(5):
+        await enqueue_outbox(session, INVENTORY_SYNC, ticket_type_id)
+    await session.commit()
+    real_eval = business.eval
+    calls = 0
+
+    async def project(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if fail_projection:
+            raise ConnectionError("模拟整组投影失败")
+        return await real_eval(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(business, "eval", project)
+        # 本轮只领取 3 条，同票种的另外 2 条不能因合并投影被误删。
+        delivered = await transaction_outbox(session, business).dispatch_batch(
+            batch_size=3
+        )
+    assert calls == 1
+    assert delivered == (0 if fail_projection else 3)
+    session.expire_all()
+    pending = list(await session.scalars(select(OutboxEvent).order_by(OutboxEvent.id)))
+    assert len(pending) == (5 if fail_projection else 2)
+    assert [item.attempts for item in pending] == (
+        [1, 1, 1, 0, 0] if fail_projection else [0, 0]
+    )
+    # 后续恢复时，相同票种的剩余待办仍能成功投递。
+    for item in pending:
+        item.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    await session.commit()
+    assert await transaction_outbox(session, business).dispatch_batch() == len(pending)
+    assert await business.get(RedisKeys.ticket_type_inventory(ticket_type_id)) == "4"
+    assert await session.scalar(select(func.count(OutboxEvent.id))) == 0
