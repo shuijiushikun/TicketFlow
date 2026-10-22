@@ -38,6 +38,12 @@ CACHE_REDIS_DURATION = Histogram(
     "查询缓存 Redis 操作耗时。",
     registry=registry,
 )
+INVENTORY_READS = Counter(
+    "ticketcore_inventory_reads_total",
+    "余票展示读取次数，区分 Redis 命中与数据库回源。",
+    ("source",),
+    registry=registry,
+)
 DB_ADMISSION = Counter(
     "ticketcore_db_admission_total",
     "查询回源预算准入结果。",

@@ -1,24 +1,47 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Path, Response, status
 
 from src.api.decorators import idempotent
 from src.api.deps import (
     IdempotencyHeader,
     IdempotencyServiceDep,
+    InventoryQueryServiceDep,
     TicketTypeServiceDep,
     get_current_superuser,
+    limit_event_queries,
 )
 from src.core.exception import EmptyUpdateDataError
 from src.models import User
 from src.schemas.ticket_type import (
     TicketTypeCreate,
     TicketTypeDetailResponse,
+    TicketTypeInventoryResponse,
     TicketTypeResponse,
     TicketTypeUpdate,
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/{ticket_type_id}/inventory",
+    response_model=TicketTypeInventoryResponse,
+    summary="查询展示余票",
+    dependencies=[Depends(limit_event_queries)],
+)
+async def ticket_type_inventory(
+    ticket_type_id: Annotated[int, Path(gt=0, le=2**31 - 1)],
+    inventory_service: InventoryQueryServiceDep,
+    response: Response,
+) -> TicketTypeInventoryResponse:
+    """无需登录，返回供页面展示的余票快照。
+
+    余票可能存在同步延迟；不能依据该值保证购票成功或认定最终售罄，
+    预订时仍由 PostgreSQL 原子扣票决定结果。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return await inventory_service.get(ticket_type_id)
 
 
 @router.post(

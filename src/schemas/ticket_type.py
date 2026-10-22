@@ -44,6 +44,15 @@ class TicketTypeDetailResponse(TicketTypeResponse):
     )
 
 
+class TicketTypeInventoryResponse(BaseModel):
+    """供展示的余票快照；最终购票结果以数据库扣票为准。"""
+
+    ticket_type_id: PositiveInt = Field(description="票种 ID")
+    remaining: NonNegativeInt = Field(
+        description="展示余票数，可能存在同步延迟，不作为购票成功或售罄的最终依据"
+    )
+
+
 class TicketTypeUpdate(BaseModel):
     """修改票种的请求体，可按需提供名称、价格和总票数。"""
 

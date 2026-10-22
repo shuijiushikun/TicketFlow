@@ -23,6 +23,7 @@ from src.services.event import EventService
 from src.services.health import HealthService
 from src.services.hotspot import HotspotTracker
 from src.services.idempotency import IdempotencyService
+from src.services.inventory_query import InventoryQueryService
 from src.services.payment import PaymentService
 from src.services.ticket import TicketService
 from src.services.ticket_type import TicketTypeService
@@ -156,6 +157,13 @@ async def get_idempotency_service(
     return IdempotencyService(redis, session)
 
 
+async def get_inventory_query_service(
+    session: DBDep, redis: RedisClient = Depends(get_cache_redis)
+) -> InventoryQueryService:
+    """余票展示使用独立读服务，不参与交易判断。"""
+    return InventoryQueryService(session, redis)
+
+
 async def get_payment_service(
     session: DBDep, redis: RedisClient = Depends(get_redis)
 ) -> PaymentService:
@@ -174,6 +182,9 @@ TicketServiceDep = Annotated[TicketService, Depends(get_ticket_service)]
 EventServiceDep = Annotated[EventService, Depends(get_event_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 TicketTypeServiceDep = Annotated[TicketTypeService, Depends(get_ticket_type_service)]
+InventoryQueryServiceDep = Annotated[
+    InventoryQueryService, Depends(get_inventory_query_service)
+]
 IdempotencyServiceDep = Annotated[IdempotencyService, Depends(get_idempotency_service)]
 PaymentServiceDep = Annotated[PaymentService, Depends(get_payment_service)]
 HealthServiceDep = Annotated[HealthService, Depends(get_health_service)]

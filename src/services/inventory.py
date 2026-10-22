@@ -55,10 +55,10 @@ async def project_inventory(
     available = (
         ticket_type.tickets_quantity - ticket_type.tickets_sold if ticket_type else None
     )
-    await _write_inventory(redis, ticket_type_id, version, available)
+    await write_inventory_snapshot(redis, ticket_type_id, version, available)
 
 
-async def _write_inventory(
+async def write_inventory_snapshot(
     redis: RedisClient, ticket_type_id: int, version: int, available: int | None
 ) -> None:
     """用统一版本规则写入快照，删除墓碑同样拒绝迟到覆盖。"""
@@ -88,7 +88,7 @@ async def sync_reserved_inventory(
     """业务提交后投影扣票快照；写入或确认失败均保留持久化待办。"""
     try:
         async with asyncio.timeout(0.5):
-            await _write_inventory(redis, ticket_type_id, version, available)
+            await write_inventory_snapshot(redis, ticket_type_id, version, available)
             # 晚到快照被拒绝说明 Redis 已有更新版本，同样可以确认本条待办。
             async with async_sessionmaker(session.bind)() as ack, ack.begin():
                 await ack.execute(

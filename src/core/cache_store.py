@@ -79,7 +79,7 @@ class EventCacheStore:
             self.circuit.fail()
             CACHE_REDIS_OPERATIONS.labels("error").inc()
             logger.warning(
-                "活动查询缓存暂不可用，启用有界回源；操作=%s，异常=%s.%s，"
+                "查询缓存暂不可用，启用有界回源；操作=%s，异常=%s.%s，"
                 "耗时=%.1fms，预算=%.1fms",
                 getattr(operation, "__qualname__", type(operation).__name__),
                 type(exc).__module__,
