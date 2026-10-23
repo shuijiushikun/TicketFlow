@@ -133,7 +133,7 @@ async def test_warmup_batch_is_deduplicated_and_releases_lock(
         "warmup_admission": DatabaseAdmission(1, 0, 0.05, 1, budget="warmup"),
         "session_maker": session_factory,
     }
-    lock_key = "ticketcore:cache:v2:warmup:batch:lock"
+    lock_key = "ticketflow:cache:v2:warmup:batch:lock"
     await memory_cache.set(lock_key, "another-worker", px=30000)
     await warm_hot_events(ctx)
     session.scalars.assert_not_awaited()

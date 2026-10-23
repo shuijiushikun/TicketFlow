@@ -155,10 +155,10 @@ def test_manifest_rejects_invalid_ids(tmp_path: Path, payload: object) -> None:
 @pytest.mark.parametrize(
     "database_url",
     [
-        "postgresql+asyncpg://tester@localhost/ticketcore",
-        "postgresql+asyncpg://tester@localhost/ticketcore_test",
-        "postgresql+asyncpg://tester@localhost/ticketcore_loadtest_backup",
-        "sqlite+aiosqlite:///ticketcore_loadtest",
+        "postgresql+asyncpg://tester@localhost/ticketflow",
+        "postgresql+asyncpg://tester@localhost/ticketflow_test",
+        "postgresql+asyncpg://tester@localhost/ticketflow_loadtest_backup",
+        "sqlite+aiosqlite:///ticketflow_loadtest",
         "",
     ],
 )
@@ -175,8 +175,8 @@ def test_seed_cli_requires_explicit_database_url() -> None:
     with pytest.raises(SystemExit) as failure:
         parse_args([])
     assert failure.value.code == 2
-    url = "postgresql+asyncpg://tester@localhost/ticketcore_loadtest"
-    assert validate_database_url(url).database == "ticketcore_loadtest"
+    url = "postgresql+asyncpg://tester@localhost/ticketflow_loadtest"
+    assert validate_database_url(url).database == "ticketflow_loadtest"
 
 
 def test_locust_requires_secret_and_refreshes_before_token_expiry(

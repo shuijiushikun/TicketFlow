@@ -65,7 +65,7 @@ async def redis_clients(ticket: Ticket) -> AsyncIterator[tuple[FakeRedis, FakeRe
     server = FakeServer()
     business = FakeRedis(server=server, db=0, decode_responses=True)
     queue = FakeRedis(server=server, db=1, decode_responses=True)
-    await business.set(f"ticketcore:inventory:ticket_type:{ticket.ticket_type_id}", 4)
+    await business.set(f"ticketflow:inventory:ticket_type:{ticket.ticket_type_id}", 4)
     await business.hset(
         "system:active_reservations", str(ticket.id), f"{ticket.ticket_type_id}:1"
     )

@@ -18,7 +18,7 @@ class UserBase(BaseModel):
         min_length=5,
         max_length=254,
         description="用户邮箱",
-        examples=["seliukovvladyslav@gmail.com"],
+        examples=["user@example.com"],
     )
     is_active: bool = Field(default=True, description="账号是否启用")
 
@@ -62,7 +62,7 @@ class UserUpdate(BaseModel):
         min_length=5,
         max_length=254,
         description="用户邮箱",
-        examples=["seliukovvladyslav@gmail.com"],
+        examples=["user@example.com"],
     )
     password: str | None = Field(
         None,

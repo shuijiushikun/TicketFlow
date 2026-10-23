@@ -28,7 +28,7 @@ async def warm_hot_events(ctx: dict[str, Any]) -> None:
     redis = ctx["cache_redis"]
     circuit = ctx["cache_circuit"]
     store = EventCacheStore(redis, circuit)
-    batch = CacheLock(redis, "ticketcore:cache:v2:warmup:batch:lock", 30000)
+    batch = CacheLock(redis, "ticketflow:cache:v2:warmup:batch:lock", 30000)
     acquired = False
     try:
         acquired = await store.call(batch.acquire)

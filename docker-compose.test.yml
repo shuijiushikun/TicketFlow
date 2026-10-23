@@ -1,4 +1,4 @@
-name: ticketcore-test
+name: ticketflow-test
 
 services:
   postgres:

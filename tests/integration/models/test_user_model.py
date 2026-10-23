@@ -10,7 +10,7 @@ from tests.factories import UserFactory
 @pytest.mark.asyncio
 class TestUserModel:
     VALID_PAYLOAD = {
-        "email": "seliukovvladyslav@gmail.com",
+        "email": "user@example.com",
         "password": "very_secure_password",
     }
 

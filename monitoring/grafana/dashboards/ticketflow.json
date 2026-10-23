@@ -1,11 +1,11 @@
 {
-  "uid": "ticketcore-cache",
-  "title": "TicketCore 查询缓存与规则预热",
+  "uid": "ticketflow-cache",
+  "title": "TicketFlow 查询缓存与规则预热",
   "schemaVersion": 39,
   "version": 1,
   "description": "查询与后台预热分别观测。所有数值来自实际抓取；本看板不宣称未经对照验证的性能收益。每容器仅一个工作进程。",
   "tags": [
-    "TicketCore",
+    "TicketFlow",
     "缓存治理",
     "规则预热"
   ],
@@ -36,12 +36,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(ticketcore_http_requests_total{status=~\"2..\"}[$__rate_interval])) or on() (0 * sum(rate(ticketcore_http_requests_total[$__rate_interval])))) / clamp_min(sum(rate(ticketcore_http_requests_total[$__rate_interval])), 1e-9)",
+          "expr": "(sum(rate(ticketflow_http_requests_total{status=~\"2..\"}[$__rate_interval])) or on() (0 * sum(rate(ticketflow_http_requests_total[$__rate_interval])))) / clamp_min(sum(rate(ticketflow_http_requests_total[$__rate_interval])), 1e-9)",
           "legendFormat": "成功响应占比",
           "range": true
         }
@@ -77,12 +77,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (rate(ticketcore_http_requests_total{status=~\"429|503\"}[$__rate_interval]))",
+          "expr": "sum by (status) (rate(ticketflow_http_requests_total{status=~\"429|503\"}[$__rate_interval]))",
           "legendFormat": "HTTP {{status}}",
           "range": true
         }
@@ -117,18 +117,18 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(ticketcore_http_request_seconds_bucket{status=~\"2..\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(ticketflow_http_request_seconds_bucket{status=~\"2..\"}[$__rate_interval])))",
           "legendFormat": "2xx {{route}}",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, status) (rate(ticketcore_http_request_seconds_bucket{status=~\"429|503\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, status) (rate(ticketflow_http_request_seconds_bucket{status=~\"429|503\"}[$__rate_interval])))",
           "legendFormat": "HTTP {{status}}",
           "range": true
         }
@@ -163,18 +163,18 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(ticketcore_cache_events_total{source=\"request\",event=~\"hit|negative_hit\"}[$__rate_interval])) or on() (0 * sum(rate(ticketcore_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])))) / clamp_min(sum(rate(ticketcore_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])), 1e-9)",
+          "expr": "(sum(rate(ticketflow_cache_events_total{source=\"request\",event=~\"hit|negative_hit\"}[$__rate_interval])) or on() (0 * sum(rate(ticketflow_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])))) / clamp_min(sum(rate(ticketflow_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])), 1e-9)",
           "legendFormat": "总命中率（含负命中）",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "(sum(rate(ticketcore_cache_events_total{source=\"request\",event=\"negative_hit\"}[$__rate_interval])) or on() (0 * sum(rate(ticketcore_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])))) / clamp_min(sum(rate(ticketcore_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])), 1e-9)",
+          "expr": "(sum(rate(ticketflow_cache_events_total{source=\"request\",event=\"negative_hit\"}[$__rate_interval])) or on() (0 * sum(rate(ticketflow_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])))) / clamp_min(sum(rate(ticketflow_cache_events_total{source=\"request\",event=~\"hit|negative_hit|miss\"}[$__rate_interval])), 1e-9)",
           "legendFormat": "负命中率",
           "range": true
         }
@@ -210,12 +210,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (source, event) (rate(ticketcore_cache_events_total{event=~\"lock_acquired|lock_contended|lock_timeout\"}[$__rate_interval]))",
+          "expr": "sum by (source, event) (rate(ticketflow_cache_events_total{event=~\"lock_acquired|lock_contended|lock_timeout\"}[$__rate_interval]))",
           "legendFormat": "{{source}} · {{event}}",
           "range": true
         }
@@ -250,18 +250,18 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (budget) (ticketcore_db_active)",
+          "expr": "sum by (budget) (ticketflow_db_active)",
           "legendFormat": "执行 {{budget}}",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum by (budget) (ticketcore_db_queued)",
+          "expr": "sum by (budget) (ticketflow_db_queued)",
           "legendFormat": "排队 {{budget}}",
           "range": true
         }
@@ -296,12 +296,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (budget, result) (rate(ticketcore_db_admission_total[$__rate_interval]))",
+          "expr": "sum by (budget, result) (rate(ticketflow_db_admission_total[$__rate_interval]))",
           "legendFormat": "{{budget}} · {{result}}",
           "range": true
         }
@@ -336,12 +336,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, budget) (rate(ticketcore_db_wait_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, budget) (rate(ticketflow_db_wait_seconds_bucket[$__rate_interval])))",
           "legendFormat": "{{budget}}",
           "range": true
         }
@@ -376,12 +376,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, budget, result) (rate(ticketcore_db_query_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, budget, result) (rate(ticketflow_db_query_seconds_bucket[$__rate_interval])))",
           "legendFormat": "{{budget}} · {{result}}",
           "range": true
         }
@@ -416,18 +416,18 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (result) (rate(ticketcore_cache_redis_operations_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(ticketflow_cache_redis_operations_total[$__rate_interval]))",
           "legendFormat": "Redis {{result}}",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum by (source) (rate(ticketcore_cache_events_total{event=\"fallback\"}[$__rate_interval]))",
+          "expr": "sum by (source) (rate(ticketflow_cache_events_total{event=\"fallback\"}[$__rate_interval]))",
           "legendFormat": "故障回源 {{source}}",
           "range": true
         }
@@ -462,18 +462,18 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(ticketcore_hotspot_candidates{job=\"ticketcore-worker\"})",
+          "expr": "max(ticketflow_hotspot_candidates{job=\"ticketflow-worker\"})",
           "legendFormat": "候选数量",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum by (result) (rate(ticketcore_hotspot_records_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(ticketflow_hotspot_records_total[$__rate_interval]))",
           "legendFormat": "采集 {{result}} /秒",
           "range": true
         }
@@ -508,12 +508,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (result) (rate(ticketcore_cache_warmup_runs_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(ticketflow_cache_warmup_runs_total[$__rate_interval]))",
           "legendFormat": "{{result}}",
           "range": true
         }
@@ -548,12 +548,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (result) (rate(ticketcore_cache_warmup_items_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(ticketflow_cache_warmup_items_total[$__rate_interval]))",
           "legendFormat": "{{result}}",
           "range": true
         }
@@ -588,12 +588,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ticketcore_cache_warmup_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ticketflow_cache_warmup_seconds_bucket[$__rate_interval])))",
           "legendFormat": "预热 p95",
           "range": true
         }
@@ -628,12 +628,12 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "ticketcore-prometheus"
+        "uid": "ticketflow-prometheus"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "up{job=~\"ticketcore-api|ticketcore-worker\"}",
+          "expr": "up{job=~\"ticketflow-api|ticketflow-worker\"}",
           "legendFormat": "{{component}}",
           "range": true
         }

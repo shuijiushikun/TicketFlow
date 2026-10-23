@@ -17,7 +17,7 @@ from tests.resource_safety import RESOURCE_MARKER_KEY, TestResources
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-if any(key.startswith("TICKETCORE_TEST_") for key in os.environ):
+if any(key.startswith("TICKETFLOW_TEST_") for key in os.environ):
     try:
         TestResources.from_environment(os.environ).configure_environment(os.environ)
     except ValueError as error:

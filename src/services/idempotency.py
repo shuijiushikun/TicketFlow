@@ -41,7 +41,7 @@ class IdempotencyService:
 
     def _generate_key(self, user_id: int, action: str, idempotency_key: str) -> str:
         scope = json.dumps([user_id, action, idempotency_key]).encode("utf-8")
-        return f"ticketcore:idempotency:v2:lock:{hashlib.sha256(scope).hexdigest()}"
+        return f"ticketflow:idempotency:v2:lock:{hashlib.sha256(scope).hexdigest()}"
 
     def _hash_payload(self, payload: dict[str, Any] | None) -> str:
         payload_bytes = json.dumps(

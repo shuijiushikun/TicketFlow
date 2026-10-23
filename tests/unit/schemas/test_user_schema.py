@@ -9,7 +9,7 @@ from tests.utils import get_missing_field_cases
 
 
 def valid_create_payload() -> dict[str, Any]:
-    return {"email": "seliukovvladyslav@gmail.com", "password": "very_secure_password"}
+    return {"email": "user@example.com", "password": "very_secure_password"}
 
 
 class TestUserCreate:
@@ -53,7 +53,7 @@ class TestUserCreate:
 
 def valid_update_payload() -> dict[str, Any]:
     return {
-        "email": "seliukovvladyslav@gmail.com",
+        "email": "user@example.com",
         "password": "very_secure_password",
         "is_active": True,
     }
@@ -71,7 +71,7 @@ class TestUserUpdate:
 
     def test_partial_update(self) -> None:
         payload: dict[str, Any] = {
-            "email": "seliukovvladyslav@gmail.com",
+            "email": "user@example.com",
             "is_active": False,
         }
 
@@ -107,7 +107,7 @@ class TestUserUpdate:
 def valid_response_payload() -> dict[str, Any]:
     return {
         "id": 1,
-        "email": "seliukovvladyslav@gmail.com",
+        "email": "user@example.com",
         "is_active": True,
         "is_superuser": False,
         "hashed_password": "$2b$12$...",
@@ -139,7 +139,7 @@ class TestUserResponse:
         assert user.is_active is True
 
     def test_response_default(self) -> None:
-        minimal_payload = {"id": 1, "email": "seliukovvladyslav@gmail.com"}
+        minimal_payload = {"id": 1, "email": "user@example.com"}
         user = UserResponse.model_validate(minimal_payload)
 
         assert user.is_active is True

@@ -43,7 +43,7 @@ class HotspotTracker:
     @staticmethod
     def bucket_key(minute: int) -> str:
         """以 UTC Unix 分钟编号生成访问桶键，无逐请求永久元数据。"""
-        return f"ticketcore:analytics:v1:detail_views:{minute}"
+        return f"ticketflow:analytics:v1:detail_views:{minute}"
 
     async def record(self, event_id: int, *, now: float | None = None) -> bool:
         """追加一次已完成访问，最多等待配置时长，故障时直接跳过。"""

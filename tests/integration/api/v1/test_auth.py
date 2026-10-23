@@ -17,7 +17,7 @@ from tests.utils import get_missing_field_cases
 class TestAuthSignup:
     BASE_URL = "/api/v1/auth/signup"
     SIGNUP_PAYLOAD = {
-        "email": "seliukovvladyslav@gmail.com",
+        "email": "user@example.com",
         "password": "very_secure_password",
     }
 
@@ -105,7 +105,7 @@ class TestAuthLogin:
     BASE_URL = "/api/v1/auth/login"
     EVENT_URL = "/api/v1/events"
     LOGIN_PAYLOAD: dict[str, Any] = {
-        "username": "seliukovvladyslav@gmail.com",
+        "username": "user@example.com",
         "password": "very_secure_password",
     }
 

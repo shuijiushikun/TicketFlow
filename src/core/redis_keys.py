@@ -18,22 +18,22 @@ class RedisKeys:
     @staticmethod
     def event_static(event_id: int) -> str:
         """生成活动详情缓存哈希键，保存版本与响应正文。"""
-        return f"ticketcore:cache:v2:events:detail:{event_id}"
+        return f"ticketflow:cache:v2:events:detail:{event_id}"
 
     @staticmethod
     def event_generation(event_id: int) -> str:
         """生成活动详情版本键，包括确认不存在的活动。"""
-        return f"ticketcore:cache:v2:events:detail:{event_id}:generation"
+        return f"ticketflow:cache:v2:events:detail:{event_id}:generation"
 
     @staticmethod
     def event_list_generation() -> str:
         """生成分页列表共享的版本键。"""
-        return "ticketcore:cache:v2:events:list:generation"
+        return "ticketflow:cache:v2:events:list:generation"
 
     @staticmethod
     def event_list(offset: int, limit: int) -> str:
         """生成分页缓存键，读取时原子检查其版本是否仍有效。"""
-        return f"ticketcore:cache:v2:events:list:o:{offset}:l:{limit}"
+        return f"ticketflow:cache:v2:events:list:o:{offset}:l:{limit}"
 
     @staticmethod
     def cache_lock(cache_key: str) -> str:
@@ -43,12 +43,12 @@ class RedisKeys:
     @staticmethod
     def ticket_type_inventory(ticket_type_id: int) -> str:
         """生成数据库剩余库存的 Redis 投影键，不用于扣票决策。"""
-        return f"ticketcore:inventory:ticket_type:{ticket_type_id}"
+        return f"ticketflow:inventory:ticket_type:{ticket_type_id}"
 
     @staticmethod
     def inventory_version(ticket_type_id: int) -> str:
         """生成库存投影版本键，禁止旧同步命令覆盖新状态。"""
-        return f"ticketcore:inventory:v2:ticket_type:{ticket_type_id}:version"
+        return f"ticketflow:inventory:v2:ticket_type:{ticket_type_id}:version"
 
     @staticmethod
     def active_reservations_hash() -> str:

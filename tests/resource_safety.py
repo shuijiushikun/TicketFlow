@@ -7,7 +7,7 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-RESOURCE_MARKER_KEY = "ticketcore:test-resource-owner"
+RESOURCE_MARKER_KEY = "ticketflow:test-resource-owner"
 RESOURCE_CONTROL_DB = 15
 
 
@@ -25,11 +25,11 @@ class TestResources:
     def from_environment(cls, environment: MutableMapping[str, str]) -> TestResources:
         """校验专用目标、重置开关和实例标记；错误中不包含连接凭证。"""
         required = (
-            "TICKETCORE_TEST_POSTGRES_DSN",
-            "TICKETCORE_TEST_REDIS_URL",
-            "TICKETCORE_TEST_RESOURCE_TOKEN",
+            "TICKETFLOW_TEST_POSTGRES_DSN",
+            "TICKETFLOW_TEST_REDIS_URL",
+            "TICKETFLOW_TEST_RESOURCE_TOKEN",
         )
-        if environment.get("TICKETCORE_TEST_ALLOW_RESET") != "1" or any(
+        if environment.get("TICKETFLOW_TEST_ALLOW_RESET") != "1" or any(
             not environment.get(key) for key in required
         ):
             raise ValueError("必须显式配置专用测试资源及重置授权，拒绝使用业务配置")
@@ -92,7 +92,7 @@ class TestResources:
     @property
     def marker(self) -> str:
         """生成本轮隔离资源的所有权标记。"""
-        return f"ticketcore-test:{self.token}"
+        return f"ticketflow-test:{self.token}"
 
     @property
     def redis_control_url(self) -> str:

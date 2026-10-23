@@ -7,12 +7,12 @@ from tests.resource_safety import TestResources
 
 def resource_environment() -> dict[str, str]:
     return {
-        "TICKETCORE_TEST_ALLOW_RESET": "1",
-        "TICKETCORE_TEST_POSTGRES_DSN": (
-            "postgresql://tester:password@127.0.0.1:55433/ticketcore_integration_test"
+        "TICKETFLOW_TEST_ALLOW_RESET": "1",
+        "TICKETFLOW_TEST_POSTGRES_DSN": (
+            "postgresql://tester:password@127.0.0.1:55433/ticketflow_integration_test"
         ),
-        "TICKETCORE_TEST_REDIS_URL": "redis://127.0.0.1:56379/0",
-        "TICKETCORE_TEST_RESOURCE_TOKEN": "isolated-resource-token",
+        "TICKETFLOW_TEST_REDIS_URL": "redis://127.0.0.1:56379/0",
+        "TICKETFLOW_TEST_RESOURCE_TOKEN": "isolated-resource-token",
     }
 
 
@@ -27,17 +27,17 @@ def test_explicit_test_resources_are_required(missing: str) -> None:
 @pytest.mark.parametrize(
     "dsn",
     [
-        "postgresql://tester:password@127.0.0.1:55433/ticketcore",
+        "postgresql://tester:password@127.0.0.1:55433/ticketflow",
         "postgresql://tester:password@127.0.0.1:55433/postgres",
-        "postgresql://tester:password@127.0.0.1/ticketcore_test",
-        "sqlite:///ticketcore_test",
+        "postgresql://tester:password@127.0.0.1/ticketflow_test",
+        "sqlite:///ticketflow_test",
         "postgresql://tester:password@127.0.0.1:55433/unsafe_test?options=x",
         'postgresql://tester:password@127.0.0.1:55433/unsafe"_test',
     ],
 )
 def test_unsafe_database_targets_are_rejected(dsn: str) -> None:
     environment = resource_environment()
-    environment["TICKETCORE_TEST_POSTGRES_DSN"] = dsn
+    environment["TICKETFLOW_TEST_POSTGRES_DSN"] = dsn
     with pytest.raises(ValueError, match="测试 PostgreSQL"):
         TestResources.from_environment(environment)
 
@@ -53,7 +53,7 @@ def test_unsafe_database_targets_are_rejected(dsn: str) -> None:
 )
 def test_unsupported_redis_targets_are_rejected(url: str) -> None:
     environment = resource_environment()
-    environment["TICKETCORE_TEST_REDIS_URL"] = url
+    environment["TICKETFLOW_TEST_REDIS_URL"] = url
     with pytest.raises(ValueError, match="测试 Redis"):
         TestResources.from_environment(environment)
 
@@ -64,18 +64,18 @@ def test_test_settings_override_business_endpoints() -> None:
     resources = TestResources.from_environment(environment)
     resources.configure_environment(environment)
     assert environment["ENVIRONMENT"] == "test"
-    assert environment["POSTGRES_DB"] == "ticketcore_integration_test"
+    assert environment["POSTGRES_DB"] == "ticketflow_integration_test"
     assert environment["POSTGRES_PORT"] == "55433"
     assert environment["REDIS_PORT"] == "56379"
-    assert resources.marker == "ticketcore-test:isolated-resource-token"
+    assert resources.marker == "ticketflow-test:isolated-resource-token"
 
 
 def test_encoded_credentials_are_decoded_without_leaking() -> None:
     environment = resource_environment()
     password = "password@with:punctuation"
-    environment["TICKETCORE_TEST_POSTGRES_DSN"] = (
+    environment["TICKETFLOW_TEST_POSTGRES_DSN"] = (
         f"postgresql://tester:{quote(password, safe='')}"
-        "@127.0.0.1:55433/ticketcore_integration_test"
+        "@127.0.0.1:55433/ticketflow_integration_test"
     )
     resources = TestResources.from_environment(environment)
     resources.configure_environment(environment)

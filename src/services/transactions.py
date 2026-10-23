@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.exception import IdempotencyStateError
 from src.models.idempotency import IdempotencyRequest
 
-IDEMPOTENCY_CONTEXT_KEY = "ticketcore.idempotency_context"
+IDEMPOTENCY_CONTEXT_KEY = "ticketflow.idempotency_context"
 
 
 @dataclass

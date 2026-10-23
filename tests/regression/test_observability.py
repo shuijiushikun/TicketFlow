@@ -33,7 +33,7 @@ async def test_http_context_templates_errors_and_metrics_exclusion() -> None:
         raise RuntimeError("用于验证 500 外层中间件")
 
     before = sample(
-        "ticketcore_http_requests_total",
+        "ticketflow_http_requests_total",
         method="GET",
         route="/observability-test/{item_id}",
         status="200",
@@ -60,14 +60,14 @@ async def test_http_context_templates_errors_and_metrics_exclusion() -> None:
         assert (await client.get("/unknown-observability-path")).status_code == 404
         exported = await client.get("/metrics")
         assert exported.status_code == 200
-        assert "ticketcore_http_requests_total" in exported.text
+        assert "ticketflow_http_requests_total" in exported.text
         assert 'route="/observability-test/1"' not in exported.text
         assert 'route="/unknown-observability-path"' not in exported.text
         assert 'route="/metrics"' not in exported.text
     assert request_id_context.get() is None
     assert (
         sample(
-            "ticketcore_http_requests_total",
+            "ticketflow_http_requests_total",
             method="GET",
             route="/observability-test/{item_id}",
             status="200",
@@ -76,7 +76,7 @@ async def test_http_context_templates_errors_and_metrics_exclusion() -> None:
     )
     assert (
         sample(
-            "ticketcore_http_requests_total",
+            "ticketflow_http_requests_total",
             method="GET",
             route="__unmatched__",
             status="404",
@@ -98,8 +98,8 @@ def test_json_log_uses_context_request_id() -> None:
 
 async def test_admission_metrics_release_after_rejection_and_cancellation() -> None:
     admission = DatabaseAdmission(1, 1, 1, 2, budget="warmup")
-    active = sample("ticketcore_db_active", budget="warmup")
-    queued = sample("ticketcore_db_queued", budget="warmup")
+    active = sample("ticketflow_db_active", budget="warmup")
+    queued = sample("ticketflow_db_queued", budget="warmup")
     started, release = asyncio.Event(), asyncio.Event()
 
     async def hold() -> None:
@@ -112,8 +112,8 @@ async def test_admission_metrics_release_after_rejection_and_cancellation() -> N
     second = asyncio.create_task(hold())
     await asyncio.sleep(0)
     try:
-        assert sample("ticketcore_db_active", budget="warmup") == active + 1
-        assert sample("ticketcore_db_queued", budget="warmup") == queued + 1
+        assert sample("ticketflow_db_active", budget="warmup") == active + 1
+        assert sample("ticketflow_db_queued", budget="warmup") == queued + 1
         with pytest.raises(CacheUnavailableError):
             async with admission.slot():
                 pytest.fail("已满的预算不能继续接纳请求")
@@ -124,24 +124,24 @@ async def test_admission_metrics_release_after_rejection_and_cancellation() -> N
         second.cancel()
         release.set()
         await asyncio.gather(first, second, return_exceptions=True)
-    assert sample("ticketcore_db_active", budget="warmup") == active
-    assert sample("ticketcore_db_queued", budget="warmup") == queued
+    assert sample("ticketflow_db_active", budget="warmup") == active
+    assert sample("ticketflow_db_queued", budget="warmup") == queued
     for result in ("accepted", "rejected", "cancelled"):
-        count = sample("ticketcore_db_admission_total", budget="warmup", result=result)
+        count = sample("ticketflow_db_admission_total", budget="warmup", result=result)
         assert count >= 1
 
 
 async def test_query_timeout_is_counted_and_returns_its_slot() -> None:
     admission = DatabaseAdmission(1, 0, 0.1, 0.01)
-    active = sample("ticketcore_db_active", budget="query")
+    active = sample("ticketflow_db_active", budget="query")
     timed_out = sample(
-        "ticketcore_db_query_seconds_count", budget="query", result="timeout"
+        "ticketflow_db_query_seconds_count", budget="query", result="timeout"
     )
     with pytest.raises(CacheUnavailableError, match="数据库查询超时"):
         async with admission.slot():
             await asyncio.sleep(1)
-    assert sample("ticketcore_db_active", budget="query") == active
+    assert sample("ticketflow_db_active", budget="query") == active
     assert (
-        sample("ticketcore_db_query_seconds_count", budget="query", result="timeout")
+        sample("ticketflow_db_query_seconds_count", budget="query", result="timeout")
         == timed_out + 1
     )
