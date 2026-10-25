@@ -72,6 +72,28 @@ services:
       - backend_network
     logging: *default-logging
 
+  seckill-worker:
+    build: .
+    profiles: ["seckill"]
+    restart: unless-stopped
+    command: arq src.seckill_worker.WorkerSettings
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=db
+      - REDIS_HOST=redis
+      - POSTGRES_PORT=5432
+    depends_on:
+      backend:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - backend_network
+    logging: *default-logging
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped

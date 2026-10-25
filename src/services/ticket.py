@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Sequence
 
 from arq import ArqRedis
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,21 +11,14 @@ from src.core import logger, settings
 from src.core.exception import (
     TicketAlreadyPaidError,
     TicketNotFoundError,
-    TicketsSoldOutError,
-    TicketTypeNotFoundError,
 )
 from src.core.redis_keys import RedisClient
 from src.models import Ticket, TicketType
 from src.models.ticket import TicketStatus
 from src.schemas import TicketCreate, TicketResponse
 from src.schemas.ticket import TicketDetailResponse
-from src.services.inventory import (
-    INVENTORY_SYNC,
-    sync_reserved_inventory,
-    transaction_outbox,
-)
-from src.services.outbox import enqueue_outbox
-from src.services.reservations import cancel_reservation
+from src.services.inventory import sync_reserved_inventory, transaction_outbox
+from src.services.reservations import cancel_reservation, reserve_ticket
 from src.services.transactions import commit_business
 
 
@@ -43,42 +36,10 @@ class TicketService:
     async def create(self, user_id: int, ticket_data: TicketCreate) -> TicketResponse:
         """原子判断剩余量并扣一张票；回滚时无需跨系统加回库存。"""
         try:
-            reserved_type = (
-                await self.db.execute(
-                    update(TicketType)
-                    .where(
-                        TicketType.id == ticket_data.ticket_type_id,
-                        TicketType.tickets_sold < TicketType.tickets_quantity,
-                    )
-                    .values(
-                        tickets_sold=TicketType.tickets_sold + 1,
-                        inventory_version=TicketType.inventory_version + 1,
-                    )
-                    .returning(
-                        TicketType.id,
-                        TicketType.tickets_quantity,
-                        TicketType.tickets_sold,
-                        TicketType.inventory_version,
-                    )
-                )
-            ).one_or_none()
-            if reserved_type is None:
-                exists = await self.db.scalar(
-                    select(TicketType.id).where(
-                        TicketType.id == ticket_data.ticket_type_id
-                    )
-                )
-                if exists is None:
-                    raise TicketTypeNotFoundError("票种不存在")
-                raise TicketsSoldOutError("该票种已售罄，暂无可用库存")
-            new_ticket = Ticket(owner_id=user_id, **ticket_data.model_dump())
-            self.db.add(new_ticket)
-            await self.db.flush()
-            pending = await enqueue_outbox(
-                self.db, INVENTORY_SYNC, ticket_data.ticket_type_id
+            reserved = await reserve_ticket(
+                self.db, user_id, ticket_data.ticket_type_id
             )
-            pending_id = pending.id
-            response = TicketResponse.model_validate(new_ticket)
+            response = TicketResponse.model_validate(reserved.ticket)
             await commit_business(self.db, response)
         except SQLAlchemyError:
             await self.db.rollback()
@@ -87,10 +48,10 @@ class TicketService:
         await sync_reserved_inventory(
             self.db,
             self.redis,
-            outbox_id=pending_id,
-            ticket_type_id=reserved_type.id,
-            version=reserved_type.inventory_version,
-            available=reserved_type.tickets_quantity - reserved_type.tickets_sold,
+            outbox_id=reserved.outbox_id,
+            ticket_type_id=response.ticket_type_id,
+            version=reserved.version,
+            available=reserved.remaining,
         )
         try:
             async with asyncio.timeout(settings.TRANSACTION_REDIS_TIMEOUT_SECONDS):

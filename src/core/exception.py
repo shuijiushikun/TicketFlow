@@ -28,6 +28,18 @@ class TicketsSoldOutError(TicketError):
     pass
 
 
+class BookingModeError(TicketError):
+    """票种与请求入口不匹配，或管理员不再接受该类预订。"""
+
+    pass
+
+
+class SeckillNotFoundError(TicketError):
+    """抢票申请不存在或不属于当前用户。"""
+
+    pass
+
+
 class TicketNotFoundError(TicketError):
     """票据不存在，或不属于当前用户。"""
 

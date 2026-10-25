@@ -26,6 +26,7 @@ class TestTicketTypeCreate:
         assert ticket_type.name == self.VALID_PAYLOAD["name"]
         assert ticket_type.price == self.VALID_PAYLOAD["price"]
         assert ticket_type.tickets_quantity == self.VALID_PAYLOAD["tickets_quantity"]
+        assert ticket_type.is_seckill is False
 
     @pytest.mark.parametrize(
         "field, invalid_value, error_message_part",
@@ -68,7 +69,13 @@ class TestTicketTypeCreate:
 
 class TestTicketTypeUpdateSchema:
     @pytest.mark.parametrize(
-        "update_payload", [{"price": 1000}, {"name": "VIP"}, {"tickets_quantity": 500}]
+        "update_payload",
+        [
+            {"price": 1000},
+            {"name": "VIP"},
+            {"tickets_quantity": 500},
+            {"is_seckill": True},
+        ],
     )
     def test_valid_partial_update(self, update_payload: dict[str, Any]) -> None:
         schema = TicketTypeUpdate(**update_payload)
@@ -106,6 +113,7 @@ class TestTicketTypeResponseSchema:
             price=15000,
             tickets_quantity=100,
             tickets_sold=10,
+            is_seckill=False,
             event_id=event.id,
             event=event,
         )
@@ -117,3 +125,4 @@ class TestTicketTypeResponseSchema:
         assert response.price == 15000
         assert response.tickets_quantity == 100
         assert response.event_id == 1
+        assert response.is_seckill is False

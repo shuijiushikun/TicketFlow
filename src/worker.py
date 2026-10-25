@@ -70,7 +70,9 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     if settings.WORKER_METRICS_ENABLED:
         ctx["metrics_server"] = start_http_server(
-            settings.WORKER_METRICS_PORT, addr="0.0.0.0", registry=registry
+            ctx.get("metrics_port", settings.WORKER_METRICS_PORT),
+            addr="0.0.0.0",
+            registry=registry,
         )
 
     logger.info("后台任务进程已启动")
@@ -250,7 +252,10 @@ async def process_outbox(ctx: dict[Any, Any]) -> None:
     """每轮最多领取 1000 条，库存按票种合并；共用 5 秒执行预算。"""
     async with ctx["session_maker"]() as session:
         dispatcher = transaction_outbox(
-            session, ctx["business_redis"], ctx.get("cache_redis")
+            session,
+            ctx["business_redis"],
+            ctx.get("cache_redis"),
+            arq_pool=ctx["redis"],
         )
     await dispatcher.dispatch_batch(batch_size=1000, time_budget_seconds=5)
 

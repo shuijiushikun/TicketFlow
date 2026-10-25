@@ -18,6 +18,9 @@ class TicketTypeBase(BaseModel):
     )
 
     tickets_quantity: int = Field(..., gt=0, description="该票种的总票数，必须大于零")
+    is_seckill: bool = Field(
+        default=False, description="是否只接受异步秒杀申请；默认使用普通预约"
+    )
 
 
 class TicketTypeCreate(TicketTypeBase):
@@ -54,9 +57,10 @@ class TicketTypeInventoryResponse(BaseModel):
 
 
 class TicketTypeUpdate(BaseModel):
-    """修改票种的请求体，可按需提供名称、价格和总票数。"""
+    """修改票种的请求体，可提供名称、价格、总票数和秒杀模式。"""
 
     model_config = ConfigDict(str_strip_whitespace=True)
+    is_seckill: bool | None = Field(None, description="切换普通预约与异步秒杀入口")
 
     name: str | None = Field(
         None,

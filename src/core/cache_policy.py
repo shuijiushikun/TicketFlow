@@ -28,10 +28,10 @@ class CacheUnavailableError(Exception):
 
 
 class QueryRateLimitError(Exception):
-    """活动查询超过本地请求预算，附带至少一秒的重试间隔。"""
+    """请求超过本地预算，附带至少一秒的重试间隔。"""
 
     def __init__(self, retry_after: int) -> None:
-        super().__init__("活动查询过于频繁，请稍后重试")
+        super().__init__("请求过于频繁，请稍后重试")
         self.retry_after = max(1, retry_after)
 
 

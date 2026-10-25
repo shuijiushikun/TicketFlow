@@ -34,6 +34,16 @@ class Settings(BaseSettings):
 
     TICKET_RESERVATION_TIME_SECONDS: int
 
+    # 新入口显式开启；旧票种默认仍为普通预约，后台继续恢复已接收申请。
+    SECKILL_ENABLED: bool = False
+    SECKILL_QUEUE_NAME: str = "ticketflow:seckill:queue"
+    SECKILL_MAX_PENDING: int = Field(default=200, ge=1, le=100000)
+    SECKILL_WAIT_SECONDS: int = Field(default=60, ge=5, le=600)
+    SECKILL_WORKER_CONCURRENCY: int = Field(default=4, ge=1, le=20)
+    SECKILL_JOB_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=10)
+    SECKILL_RECOVERY_BATCH: int = Field(default=100, ge=1, le=500)
+    SECKILL_WORKER_METRICS_PORT: int = Field(default=8002, ge=1, le=65535)
+
     # 仅用于活动查询缓存；库存、支付和 Arq 不使用这些过期与准入参数。
     CACHE_DETAIL_TTL_SECONDS: int = Field(default=86400, ge=1)
     CACHE_DETAIL_JITTER_SECONDS: int = Field(default=3600, ge=0)

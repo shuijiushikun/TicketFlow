@@ -25,6 +25,7 @@ from src.services.hotspot import HotspotTracker
 from src.services.idempotency import IdempotencyService
 from src.services.inventory_query import InventoryQueryService
 from src.services.payment import PaymentService
+from src.services.seckill import SeckillService
 from src.services.ticket import TicketService
 from src.services.ticket_type import TicketTypeService
 
@@ -178,6 +179,15 @@ async def get_health_service(
     return HealthService(session=session, redis=redis)
 
 
+async def get_seckill_service(
+    session: DBDep,
+    redis: RedisClient = Depends(get_redis),
+    pool: ArqRedis = Depends(get_arq_pool),
+) -> SeckillService:
+    """组装申请服务，保持与现有幂等装饰器使用同一数据库会话。"""
+    return SeckillService(session, redis, pool)
+
+
 TicketServiceDep = Annotated[TicketService, Depends(get_ticket_service)]
 EventServiceDep = Annotated[EventService, Depends(get_event_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
@@ -188,3 +198,4 @@ InventoryQueryServiceDep = Annotated[
 IdempotencyServiceDep = Annotated[IdempotencyService, Depends(get_idempotency_service)]
 PaymentServiceDep = Annotated[PaymentService, Depends(get_payment_service)]
 HealthServiceDep = Annotated[HealthService, Depends(get_health_service)]
+SeckillServiceDep = Annotated[SeckillService, Depends(get_seckill_service)]

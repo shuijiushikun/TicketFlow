@@ -96,7 +96,7 @@ async def ticket_type_delete(
 ) -> None:
     """删除票种。
 
-    仅管理员可操作。已有相关票据时，数据库关联约束会阻止删除。
+    仅管理员可操作。已有票据或抢票申请时保留票种，可通过修改票种关闭秒杀模式。
     """
     await ticket_type_service.delete(ticket_type_id)
 
@@ -105,7 +105,7 @@ async def ticket_type_delete(
     "/{ticket_type_id}",
     response_model=TicketTypeResponse,
     status_code=status.HTTP_200_OK,
-    summary="修改票种名称、价格或总票数",
+    summary="修改票种信息及预约模式",
 )
 async def ticket_type_update(
     ticket_type_id: int,
@@ -113,9 +113,10 @@ async def ticket_type_update(
     ticket_type_service: TicketTypeServiceDep,
     admin: Annotated[User, Depends(get_current_superuser)],
 ) -> TicketTypeResponse:
-    """修改票种名称、价格或总票数。
+    """修改票种名称、价格、总票数或秒杀模式。
 
     仅管理员可操作，只更新提供的字段。总票数不能小于已占用数量。
+    is_seckill 为 true 时只接受秒杀申请；切回 false 后，尚未处理的申请会被拒绝。
     请求体没有待修改字段时返回 400。
     """
     if not update_data.model_dump(exclude_unset=True):

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable
 from typing import Any, cast
 
+from arq import ArqRedis
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -20,6 +21,7 @@ from src.services.outbox import (
     OutboxDispatcher,
     event_cache_handler,
 )
+from src.services.seckill_queue import SECKILL_DISPATCH, seckill_dispatch_handler
 
 INVENTORY_SYNC = "inventory_sync"
 RESERVATION_CLEANUP = "reservation_cleanup"
@@ -111,6 +113,8 @@ def transaction_outbox(
     session: AsyncSession,
     redis: RedisClient,
     cache_redis: RedisClient | None = None,
+    *,
+    arq_pool: ArqRedis | None = None,
 ) -> OutboxDispatcher:
     """为写服务装配独立投递事务，库存和查询缓存使用各自连接。"""
 
@@ -134,16 +138,19 @@ def transaction_outbox(
                 ),
             )
 
+    handlers = {
+        EVENT_CACHE_INVALIDATE: event_cache_handler(
+            EventCacheStore(
+                cache_redis if cache_redis is not None else redis, cache_circuit
+            )
+        ),
+        INVENTORY_SYNC: inventory_handler,
+        RESERVATION_CLEANUP: cleanup_handler,
+    }
+    if arq_pool is not None:
+        handlers[SECKILL_DISPATCH] = seckill_dispatch_handler(arq_pool)
     return OutboxDispatcher(
         async_sessionmaker(session.bind, expire_on_commit=False),
-        {
-            EVENT_CACHE_INVALIDATE: event_cache_handler(
-                EventCacheStore(
-                    cache_redis if cache_redis is not None else redis, cache_circuit
-                )
-            ),
-            INVENTORY_SYNC: inventory_handler,
-            RESERVATION_CLEANUP: cleanup_handler,
-        },
+        handlers,
         coalesce_kinds=frozenset({INVENTORY_SYNC}),
     )

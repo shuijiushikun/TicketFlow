@@ -1,15 +1,79 @@
 """请求与后台任务共用的预订状态变更，调用方负责锁定票据和提交。"""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core import settings
+from src.core.exception import (
+    BookingModeError,
+    TicketsSoldOutError,
+    TicketTypeNotFoundError,
+)
 from src.models import Ticket, TicketType
 from src.models.ticket import TicketStatus
 from src.services.inventory import INVENTORY_SYNC, RESERVATION_CLEANUP
 from src.services.outbox import enqueue_outbox
+
+
+@dataclass
+class ReservedTicket:
+    """尚未提交的扣票结果及待同步的库存快照。"""
+
+    ticket: Ticket
+    outbox_id: int
+    version: int
+    remaining: int
+
+
+async def reserve_ticket(
+    session: AsyncSession, owner_id: int, ticket_type_id: int, *, seckill: bool = False
+) -> ReservedTicket:
+    """普通预约与秒杀共用条件扣票；由调用方统一提交业务事务。"""
+    stock = (
+        await session.execute(
+            update(TicketType)
+            .where(
+                TicketType.id == ticket_type_id,
+                TicketType.is_seckill == seckill,
+                TicketType.tickets_sold < TicketType.tickets_quantity,
+            )
+            .values(
+                tickets_sold=TicketType.tickets_sold + 1,
+                inventory_version=TicketType.inventory_version + 1,
+            )
+            .returning(
+                TicketType.tickets_quantity,
+                TicketType.tickets_sold,
+                TicketType.inventory_version,
+            )
+        )
+    ).one_or_none()
+    if stock is None:
+        mode = await session.scalar(
+            select(TicketType.is_seckill).where(TicketType.id == ticket_type_id)
+        )
+        if mode is None:
+            raise TicketTypeNotFoundError("票种不存在")
+        if mode != seckill:
+            raise BookingModeError(
+                "该票种请通过秒杀入口排队申请"
+                if mode
+                else "该票种请通过普通预约入口购票"
+            )
+        raise TicketsSoldOutError("该票种已售罄，暂无可用库存")
+    ticket = Ticket(owner_id=owner_id, ticket_type_id=ticket_type_id)
+    session.add(ticket)
+    await session.flush()
+    pending = await enqueue_outbox(session, INVENTORY_SYNC, ticket_type_id)
+    return ReservedTicket(
+        ticket,
+        pending.id,
+        stock.inventory_version,
+        stock.tickets_quantity - stock.tickets_sold,
+    )
 
 
 def reservation_expired(ticket: Ticket, now: datetime | None = None) -> bool:

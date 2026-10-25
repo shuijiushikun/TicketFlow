@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, TimestampMixin
@@ -26,6 +26,9 @@ class TicketType(Base, TimestampMixin):
 
     tickets_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     tickets_sold: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_seckill: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     inventory_version: Mapped[int] = mapped_column(
         BigInteger, default=0, server_default="0", nullable=False
     )

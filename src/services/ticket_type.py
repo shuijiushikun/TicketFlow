@@ -13,7 +13,7 @@ from src.core.exception import (
     TicketTypeQuantity,
 )
 from src.core.redis_keys import RedisClient
-from src.models import Ticket, TicketType
+from src.models import SeckillRequest, Ticket, TicketType
 from src.schemas.ticket_type import (
     TicketTypeCreate,
     TicketTypeDetailResponse,
@@ -109,7 +109,7 @@ class TicketTypeService:
         ]
 
     async def delete(self, ticket_type_id: int) -> None:
-        """删除票种并清理库存及活动缓存；已有关联票据时拒绝删除。"""
+        """删除票种并清理缓存；保留票据或抢票申请所引用的票种。"""
         ticket_type = await self._locked(ticket_type_id)
 
         try:
@@ -123,6 +123,15 @@ class TicketTypeService:
             )
             if associated is not None:
                 raise TicketTypeDeleteError("票种已存在关联票据，无法删除")
+            application = await self.db.scalar(
+                select(SeckillRequest.id)
+                .where(SeckillRequest.ticket_type_id == ticket_type_id)
+                .limit(1)
+            )
+            if application is not None:
+                raise TicketTypeDeleteError(
+                    "票种已存在抢票申请，无法删除；可关闭秒杀模式"
+                )
 
             await self.db.delete(ticket_type)
             await self.db.flush()
@@ -130,8 +139,8 @@ class TicketTypeService:
             await commit_business(self.db)
         except IntegrityError as e:
             await self.db.rollback()
-            logger.warning(f"票种 {ticket_type_id} 已存在关联票据，无法删除")
-            raise TicketTypeDeleteError("票种已存在关联票据，无法删除") from e
+            logger.warning(f"票种 {ticket_type_id} 已存在关联票据或抢票申请，无法删除")
+            raise TicketTypeDeleteError("票种已存在关联票据或抢票申请，无法删除") from e
         except SQLAlchemyError:
             await self.db.rollback()
             raise

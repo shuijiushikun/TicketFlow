@@ -8,11 +8,12 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from src.api import health, observability
-from src.api.v1 import analytics, auth, events, payment, ticket_type, tickets
+from src.api.v1 import analytics, auth, events, payment, seckill, ticket_type, tickets
 from src.core import logger
 from src.core.cache_policy import CacheUnavailableError, QueryRateLimitError
 from src.core.config import settings
 from src.core.exception import (
+    BookingModeError,
     EmptyUpdateDataError,
     EventDeleteError,
     EventNotFoundError,
@@ -21,6 +22,7 @@ from src.core.exception import (
     IdempotencyStateError,
     InactiveUserError,
     InvalidCredentialsError,
+    SeckillNotFoundError,
     TicketAlreadyPaidError,
     TicketNotFoundError,
     TicketReservationExpireError,
@@ -83,6 +85,10 @@ app = ObservedFastAPI(
             "description": "预订一张票、查询自己的票据和取消未付款预订。",
         },
         {
+            "name": "异步秒杀",
+            "description": "提交秒杀申请并查询结果；抢到后沿用原有支付和取消。",
+        },
+        {
             "name": "模拟支付",
             "description": "将有效预订标记为已售出，不调用真实支付渠道。",
         },
@@ -112,6 +118,9 @@ app.include_router(
 app.include_router(
     events.router, prefix=f"{settings.API_V1_STR}/events", tags=["活动管理"]
 )
+app.include_router(
+    seckill.router, prefix=f"{settings.API_V1_STR}/seckill", tags=["异步秒杀"]
+)
 
 
 @app.exception_handler(InvalidCredentialsError)
@@ -128,6 +137,7 @@ async def auth_exception_handler(request: Request, exc: Exception) -> JSONRespon
 @app.exception_handler(TicketTypeNotFoundError)
 @app.exception_handler(TicketNotFoundError)
 @app.exception_handler(EventNotFoundError)
+@app.exception_handler(SeckillNotFoundError)
 async def not_found_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """将活动、票种或票据不存在等异常统一转换为 404。"""
     return JSONResponse(
@@ -143,6 +153,7 @@ async def not_found_exception_handler(request: Request, exc: Exception) -> JSONR
 @app.exception_handler(EventDeleteError)
 @app.exception_handler(UserAlreadyExistsError)
 @app.exception_handler(TicketsSoldOutError)
+@app.exception_handler(BookingModeError)
 async def conflict_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """将售罄、账号重复、幂等冲突和非法业务操作统一转换为 409。"""
     return JSONResponse(
