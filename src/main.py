@@ -34,6 +34,7 @@ from src.core.exception import (
 )
 from src.core.request_context import RequestContextMiddleware
 from src.db.redis import close_redis_pool, init_redis_pool
+from src.db.session import warmup_connections
 
 
 @asynccontextmanager
@@ -45,10 +46,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("正在初始化 Redis 连接池……")
     await init_redis_pool()
 
-    yield
-
-    logger.info("正在关闭 Redis 连接池……")
-    await close_redis_pool()
+    try:
+        if settings.SECKILL_ENABLED:
+            await warmup_connections(settings.SECKILL_SUBMIT_CONCURRENCY)
+        yield
+    finally:
+        logger.info("正在关闭 Redis 连接池……")
+        await close_redis_pool()
 
 
 class ObservedFastAPI(FastAPI):

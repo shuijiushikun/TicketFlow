@@ -1,5 +1,6 @@
 """提交异步抢票申请及查询本人结果。"""
 
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Path, Request, Response, status
@@ -8,7 +9,12 @@ from src.api.decorators import idempotent
 from src.api.deps import IdempotencyServiceDep, SeckillServiceDep, get_current_user
 from src.core.cache_policy import CacheUnavailableError
 from src.core.config import settings
-from src.core.seckill_policy import POLL_LIMITER, SUBMIT_LIMITER
+from src.core.seckill_policy import (
+    POLL_LIMITER,
+    SUBMIT_ADMISSION,
+    SUBMIT_LIMITER,
+    submission_stage,
+)
 from src.models import User
 from src.schemas.seckill import SeckillCreate, SeckillResponse
 
@@ -18,11 +24,14 @@ RequiredKey = Annotated[
 ]
 
 
-async def limit_submission(request: Request) -> None:
-    """为新申请保留独立入口预算；总开关只影响接收，不隐藏已有结果。"""
+async def limit_submission(request: Request) -> AsyncIterator[None]:
+    """先限制接收并发再查库；总开关只影响接收，不隐藏已有结果。"""
     if not settings.SECKILL_ENABLED:
         raise CacheUnavailableError("秒杀入口尚未开启")
     SUBMIT_LIMITER.check(request.client.host if request.client else "unknown")
+    async with SUBMIT_ADMISSION.slot():
+        with submission_stage("acceptance"):
+            yield
 
 
 async def limit_polling(request: Request) -> None:

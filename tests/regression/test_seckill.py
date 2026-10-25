@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.api.deps import get_current_user
 from src.core.cache_policy import QueryRateLimiter
 from src.core.config import settings
+from src.core.seckill_policy import SubmissionAdmission
 from src.main import app
 from src.models import OutboxEvent, Ticket, TicketType, User
 from src.models.seckill import SeckillRequest
@@ -22,6 +23,35 @@ from src.services.inventory import transaction_outbox
 from src.services.seckill_queue import SECKILL_DISPATCH
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_full_entry_rejects_before_user_lookup_or_database_writes(
+    lifecycle_client, session, ticket, monkeypatch
+):
+    gate = SubmissionAdmission(1, 0, 1)
+    monkeypatch.setattr(
+        "src.api.v1.seckill.SUBMIT_ADMISSION",
+        gate,
+    )
+    lookup = AsyncMock(return_value=User(id=ticket.owner_id))
+
+    async def current_user():
+        return await lookup()
+
+    monkeypatch.setitem(app.dependency_overrides, get_current_user, current_user)
+    ticket.ticket_type.is_seckill = True
+    await session.commit()
+    async with gate.slot():
+        response = await lifecycle_client.post(
+            "/api/v1/seckill/requests",
+            json={"ticket_type_id": ticket.ticket_type_id},
+            headers={"Idempotency-Key": "seckill-entry-full-001"},
+        )
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    lookup.assert_not_awaited()
+    assert await session.scalar(select(func.count(SeckillRequest.id))) == 0
+    assert await session.scalar(select(func.count(OutboxEvent.id))) == 0
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -34,6 +64,9 @@ async def isolated_request_state(lifecycle_client, ticket, monkeypatch):
         lambda: User(id=owner_id, email="seckill@example.com", is_active=True),
     )
     monkeypatch.setattr(settings, "SECKILL_ENABLED", True)
+    monkeypatch.setattr(
+        "src.api.v1.seckill.SUBMIT_ADMISSION", SubmissionAdmission(8, 56, 1)
+    )
     for name in ("SUBMIT_LIMITER", "POLL_LIMITER"):
         monkeypatch.setattr(
             f"src.api.v1.seckill.{name}", QueryRateLimiter(100, 200, 100, 200, 100)
@@ -55,6 +88,8 @@ async def test_seckill_receipt_is_durable_idempotent_and_owned(
         "/api/v1/seckill/requests", json=payload, headers=headers
     )
     assert first.status_code == 202, first.text
+    # 队列已经满时，同一次重试仍先复用持久响应，不重新占用名额。
+    monkeypatch.setattr(settings, "SECKILL_MAX_PENDING", 1)
     second = await lifecycle_client.post(
         "/api/v1/seckill/requests", json=payload, headers=headers
     )

@@ -8,6 +8,35 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 registry = CollectorRegistry()
 
+SECKILL_ENTRY_RESULTS = Counter(
+    "ticketflow_seckill_entry_total",
+    "秒杀申请入口准入结果；accepted 仅表示允许开始接收处理。",
+    ("result",),
+    registry=registry,
+)
+SECKILL_ENTRY_ACTIVE = Gauge(
+    "ticketflow_seckill_entry_active",
+    "当前正在接收处理的秒杀申请数量，按 API 进程限制。",
+    registry=registry,
+)
+SECKILL_ENTRY_WAITING = Gauge(
+    "ticketflow_seckill_entry_waiting",
+    "尚未开始查询用户与幂等记录的秒杀申请等待数量。",
+    registry=registry,
+)
+SECKILL_ENTRY_WAIT_SECONDS = Histogram(
+    "ticketflow_seckill_entry_wait_seconds",
+    "秒杀申请在本地入口缓冲中等待的时间。",
+    registry=registry,
+)
+SECKILL_SUBMIT_SECONDS = Histogram(
+    "ticketflow_seckill_submit_stage_seconds",
+    "秒杀接收分段耗时；acceptance 包含鉴权、幂等及申请保存，分段有包含关系。",
+    ("stage", "result"),
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+    registry=registry,
+)
+
 HTTP_REQUESTS = Counter(
     "ticketflow_http_requests_total",
     "HTTP 请求数，包含成功、拒绝与失败响应。",

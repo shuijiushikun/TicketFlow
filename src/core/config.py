@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     SECKILL_QUEUE_NAME: str = "ticketflow:seckill:queue"
     SECKILL_MAX_PENDING: int = Field(default=200, ge=1, le=100000)
     SECKILL_WAIT_SECONDS: int = Field(default=60, ge=5, le=600)
+    # 单个 API 进程在查用户和幂等记录前的接收预算；多进程合计计算。
+    SECKILL_SUBMIT_CONCURRENCY: int = Field(default=8, ge=1, le=16)
+    SECKILL_SUBMIT_QUEUE_SIZE: int = Field(default=56, ge=0, le=200)
+    SECKILL_SUBMIT_QUEUE_TIMEOUT_SECONDS: float = Field(default=1.0, gt=0, le=2)
     SECKILL_WORKER_CONCURRENCY: int = Field(default=4, ge=1, le=20)
     SECKILL_JOB_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=10)
     SECKILL_RECOVERY_BATCH: int = Field(default=100, ge=1, le=500)

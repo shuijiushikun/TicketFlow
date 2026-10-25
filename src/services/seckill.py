@@ -14,7 +14,7 @@ from src.core.exception import (
 )
 from src.core.logger import logger
 from src.core.redis_keys import RedisClient
-from src.core.seckill_policy import acquire_admission
+from src.core.seckill_policy import acquire_admission, submission_stage
 from src.models.seckill import SeckillRequest
 from src.models.ticket_type import TicketType
 from src.schemas.seckill import SeckillCreate, SeckillResponse
@@ -33,9 +33,12 @@ class SeckillService:
 
     async def submit(self, owner_id: int, data: SeckillCreate) -> SeckillResponse:
         """接收申请并返回凭证；失败回滚，成功后的投递故障交给后台恢复。"""
-        mode = await self.db.scalar(
-            select(TicketType.is_seckill).where(TicketType.id == data.ticket_type_id)
-        )
+        with submission_stage("ticket_type"):
+            mode = await self.db.scalar(
+                select(TicketType.is_seckill).where(
+                    TicketType.id == data.ticket_type_id
+                )
+            )
         if mode is None:
             raise TicketTypeNotFoundError("票种不存在")
         if not mode:
@@ -44,18 +47,19 @@ class SeckillService:
         expires_at = await acquire_admission(self.redis, token)
         # 提交结果未知时保留名额至截止，不能在数据库可能已提交后提前让出名额。
         try:
-            request = SeckillRequest(
-                owner_id=owner_id,
-                ticket_type_id=data.ticket_type_id,
-                admission_token=token,
-                expires_at=expires_at,
-                next_dispatch_at=datetime.now(UTC) + timedelta(seconds=5),
-            )
-            self.db.add(request)
-            await self.db.flush()
-            await enqueue_outbox(self.db, SECKILL_DISPATCH, request.id)
-            response = SeckillResponse.model_validate(request)
-            await commit_business(self.db, response)
+            with submission_stage("persist"):
+                request = SeckillRequest(
+                    owner_id=owner_id,
+                    ticket_type_id=data.ticket_type_id,
+                    admission_token=token,
+                    expires_at=expires_at,
+                    next_dispatch_at=datetime.now(UTC) + timedelta(seconds=5),
+                )
+                self.db.add(request)
+                await self.db.flush()
+                await enqueue_outbox(self.db, SECKILL_DISPATCH, request.id)
+                response = SeckillResponse.model_validate(request)
+                await commit_business(self.db, response)
         except BaseException:
             await self.db.rollback()
             # 不立即释放：commit 的响应丢失不能证明数据库没有保存申请。
@@ -63,7 +67,8 @@ class SeckillService:
         try:
             # HTTP 只做一次有界快速入队，不为确认投递额外争抢数据库连接。
             # 持久化 Outbox 留给原 Worker 确认；重复任务由申请终态去重。
-            await enqueue_seckill(self.pool, response.id)
+            with submission_stage("dispatch"):
+                await enqueue_seckill(self.pool, response.id)
         except Exception:
             logger.warning(
                 "秒杀申请已保存，快速入队失败，留待后台补投 request=%s", response.id
