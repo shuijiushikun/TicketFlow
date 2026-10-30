@@ -1,0 +1,253 @@
+{
+  "date": "2026-10-30",
+  "base_commit": "cd1e8ca",
+  "scenario": "活动详情数据库直查、被动缓存、主动预热三组临期突发对照",
+  "environment": {
+    "os": "Windows",
+    "python": "3.13.9",
+    "api_processes": 1,
+    "maintenance_workers": 1,
+    "postgres": "16-alpine",
+    "redis": "7-alpine",
+    "same_host": true,
+    "event_count": 5,
+    "database_concurrency": 4,
+    "database_queue_size": 8,
+    "database_queue_timeout_ms": 50,
+    "database_query_timeout_ms": 1500,
+    "redis_operation_timeout_ms": 150,
+    "hotspot_record_timeout_ms": 20,
+    "per_ip_rate_per_second": 100,
+    "redis_maxmemory_bytes": 536870912,
+    "redis_policy": "noeviction"
+  },
+  "traffic": {
+    "duration_seconds": 60,
+    "requests_each": 1640,
+    "normal_requests_per_second": 30,
+    "initial_traffic_seconds": [
+      0,
+      40
+    ],
+    "pause_seconds": [
+      40,
+      46
+    ],
+    "burst_at_second": 46,
+    "burst_requests": 50,
+    "resumed_traffic_seconds": [
+      47,
+      60
+    ],
+    "cache_expiry_at_second": 45,
+    "trace_sha256": "6a9cae5304fe92cad5fe688c36393980e775ca3062751d6ef1d02b7c800e5f9d"
+  },
+  "method": [
+    "A仅在测试进程绕过详情缓存，调用原有数据库回源函数；保留接口、热点记录、序列化和数据库保护。",
+    "B/C先建立详情缓存，再设置测试键45秒后过期；C使用原有每分钟第10秒的Arq任务，B关闭该任务。",
+    "三组接口路径、数据库内容、请求轨迹和业务预算相同；未修改src或默认配置。",
+    "P95/P99只统计HTTP 200；全部失败与突发阶段成功样本数单列。",
+    "回源按应用层逻辑读取计数，包含关联票种加载，不是SQL条数。",
+    "C实际额外重建默认列表一次；详情、列表与后台总读取分别列出，未将列表算入详情。"
+  ],
+  "limitations": [
+    "固定A/B/C顺序、各一轮60秒，压测与服务同机，未反转顺序或重复取均值。",
+    "模拟临期，不代表正常24～25小时TTL下的日常收益或最大QPS。",
+    "A/B存在503，比较成功响应延迟时须同时看成功样本数；不能推断全部请求的同等加速。",
+    "C两次在准备阶段因回填/锁释放超时或503停止，均未产生正式负载；保留失败证据后仅补测C。",
+    "C补测前有限补查，确认初始缓存存在；准备请求与重试均不计入60秒测量。",
+    "本轮没有修复已知的访问统计、连接池与调度耦合问题。"
+  ],
+  "groups": [
+    {
+      "group": "A_direct",
+      "mode": "direct",
+      "warmup": false,
+      "start_utc": "2026-10-30T10:12:30+00:00",
+      "all": {
+        "requests": 1640,
+        "succeeded": 1586,
+        "failed": 54,
+        "success_p50_ms": 28.592,
+        "success_p95_ms": 41.278,
+        "success_p99_ms": 54.3
+      },
+      "burst": {
+        "requests": 50,
+        "succeeded": 4,
+        "failed": 46,
+        "success_p50_ms": 516.711,
+        "success_p95_ms": 521.769,
+        "success_p99_ms": 521.769
+      },
+      "steady_before_expiry": {
+        "requests": 1200,
+        "succeeded": 1192,
+        "failed": 8,
+        "success_p50_ms": 27.962,
+        "success_p95_ms": 38.58,
+        "success_p99_ms": 53.525
+      },
+      "foreground_detail_reads": 1586,
+      "background_detail_reads": 0,
+      "background_list_reads": 0,
+      "background_db_reads_total": 0,
+      "total_db_reads": 1586,
+      "total_detail_reads": 1586,
+      "initial_cache_hits": 0,
+      "initial_cache_misses": 0,
+      "cache_lock_contention": 0,
+      "cache_lock_timeouts": 0,
+      "db_admission_rejections": 38,
+      "db_queue_timeouts": 16,
+      "preburst_pttl_ms": {
+        "1": -2,
+        "2": -2,
+        "3": -2,
+        "4": -2,
+        "5": -2
+      },
+      "ready_after": 200,
+      "client_start_lag_p95_ms": 15.806,
+      "raw_hashes": {
+        "A_direct_requests.csv": "2634cd30d92f3d4494038e0fb58610f56cbcf21fd4d1a9b2b5ccab4c6b52f000",
+        "A_direct_before_api.prom": "8c2dc6dad010997fd256dcc581674515cf509e0aab7d186f92dda72033ef4135",
+        "A_direct_after_api.prom": "dffc053fb3e034615c9b52c39eb465f72334e5a81f585b4d7ad11514955951e6",
+        "A_direct_before_worker.prom": "1c6144063612358d7c6b9480c4ec1ba311d9a8f88b806833ec184869efefe0a7",
+        "A_direct_after_worker.prom": "1e3e29870cde18b93f353442ab79502bffd0dc7cf813b075bcfb2542b5acda15"
+      }
+    },
+    {
+      "group": "B_cache",
+      "mode": "cached",
+      "warmup": false,
+      "start_utc": "2026-10-30T10:14:30+00:00",
+      "all": {
+        "requests": 1640,
+        "succeeded": 1626,
+        "failed": 14,
+        "success_p50_ms": 14.998,
+        "success_p95_ms": 22.926,
+        "success_p99_ms": 591.727
+      },
+      "burst": {
+        "requests": 50,
+        "succeeded": 36,
+        "failed": 14,
+        "success_p50_ms": 587.527,
+        "success_p95_ms": 620.594,
+        "success_p99_ms": 641.253
+      },
+      "steady_before_expiry": {
+        "requests": 1200,
+        "succeeded": 1200,
+        "failed": 0,
+        "success_p50_ms": 15.017,
+        "success_p95_ms": 21.639,
+        "success_p99_ms": 29.817
+      },
+      "foreground_detail_reads": 5,
+      "background_detail_reads": 0,
+      "background_list_reads": 0,
+      "background_db_reads_total": 0,
+      "total_db_reads": 5,
+      "total_detail_reads": 5,
+      "initial_cache_hits": 1590,
+      "initial_cache_misses": 50,
+      "cache_lock_contention": 83,
+      "cache_lock_timeouts": 14,
+      "db_admission_rejections": 0,
+      "db_queue_timeouts": 0,
+      "preburst_pttl_ms": {
+        "1": -2,
+        "2": -2,
+        "3": -2,
+        "4": -2,
+        "5": -2
+      },
+      "ready_after": 200,
+      "client_start_lag_p95_ms": 16.06,
+      "raw_hashes": {
+        "B_cache_requests.csv": "06e6deb05453ab2b6aa0ad0bc64a36c9f10434dd46a2a1322999b4ab01de5f1f",
+        "B_cache_before_api.prom": "17445490cf669226a1e2cf7ce9d07b46c5af5e47bf849f2e8ece7fcb3eaab296",
+        "B_cache_after_api.prom": "77cee778b5482d50e9c88302bf0f10c95bc1a63dbf99817d43d13e083e57bc07",
+        "B_cache_before_worker.prom": "9a4f470a0d10b260b8d65086f92833cdd0d12f2c02c5e25c34b85eadf92bc84e",
+        "B_cache_after_worker.prom": "1173c1ea2c1240e684f84d5d3ff875706899aae01da2523a7edddec8f8b0b427"
+      }
+    },
+    {
+      "group": "C_warmup",
+      "mode": "cached",
+      "warmup": true,
+      "start_utc": "2026-10-30T10:21:30+00:00",
+      "all": {
+        "requests": 1640,
+        "succeeded": 1640,
+        "failed": 0,
+        "success_p50_ms": 15.177,
+        "success_p95_ms": 25.85,
+        "success_p99_ms": 399.602
+      },
+      "burst": {
+        "requests": 50,
+        "succeeded": 50,
+        "failed": 0,
+        "success_p50_ms": 394.903,
+        "success_p95_ms": 411.058,
+        "success_p99_ms": 605.71
+      },
+      "steady_before_expiry": {
+        "requests": 1200,
+        "succeeded": 1200,
+        "failed": 0,
+        "success_p50_ms": 14.537,
+        "success_p95_ms": 21.186,
+        "success_p99_ms": 24.43
+      },
+      "foreground_detail_reads": 0,
+      "background_detail_reads": 5,
+      "background_list_reads": 1,
+      "background_db_reads_total": 6,
+      "total_db_reads": 6,
+      "total_detail_reads": 5,
+      "initial_cache_hits": 1640,
+      "initial_cache_misses": 0,
+      "cache_lock_contention": 0,
+      "cache_lock_timeouts": 0,
+      "db_admission_rejections": 0,
+      "db_queue_timeouts": 0,
+      "preburst_pttl_ms": {
+        "1": 87815322,
+        "2": 87916200,
+        "3": 89496229,
+        "4": 87757254,
+        "5": 86595282
+      },
+      "ready_after": 200,
+      "client_start_lag_p95_ms": 15.793,
+      "raw_hashes": {
+        "C_warmup_requests.csv": "057d4f4530d55be1bff84a3a9e1a4fa6d01cbaa753bd5ca11cc2369d37f2dadb",
+        "C_warmup_before_api.prom": "738041f02fde138a4def0a235f91f58ac8a5db0ed94f53928c2c36a7d33a4879",
+        "C_warmup_after_api.prom": "51b6b378e7fc6344c31c22b5b00109034a636fee2f6b6a85b23b03ede4b02b7f",
+        "C_warmup_before_worker.prom": "cd375af51be0c9749c619cd02e4bff9b5c63116134ff5a718c753960b5da5487",
+        "C_warmup_after_worker.prom": "7febb78a3095b2aa959a5a068d1dc69e00e171b66d4b15bd49429f6927c9937c"
+      }
+    }
+  ],
+  "business_state": {
+    "tickets_before": 0,
+    "tickets_after": 0,
+    "inventory_sold_after": 0
+  },
+  "cleanup_verified": {
+    "owned_processes_remaining": [],
+    "closed_ports": [
+      55444,
+      56392,
+      18720,
+      18730
+    ],
+    "compose_containers_remaining": 0,
+    "compose_networks_remaining": 0
+  }
+}
